@@ -1,0 +1,359 @@
+---
+title: "D19200 - dorothea"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+#create theme to not duplicate code
+theme_jb <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid.minor = element_blank()
+     ))
+}
+
+theme_jb_nogrid <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid = element_blank(),
+       panel.border = element_blank(),
+       axis.line = element_line()
+     ))
+}
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/D19200/rp/"
+load(paste0(OUTPUT,"RData/D19200-tumornofibmono.RData"))
+```
+
+# Change seurat clusters to new numbers
+
+necessary for Violin Plots; numbers according to appaerance in trajectory
+
+```{r}
+D19200.tumor$trajectorycluster <- as.character(D19200.tumor$seurat_clusters_tumor_SCT_PCA)
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="0"] <- "6 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="1"] <- "3 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="2"] <- "4 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="3"] <- "2 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="4"] <- "1 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="5"] <- "7 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="6"] <- "5 temp"
+D19200.tumor$trajectorycluster <- sub(" temp","",D19200.tumor$trajectorycluster)
+D19200.tumor$trajectorycluster <- factor(D19200.tumor$trajectorycluster)
+
+clustercolors <- scales::hue_pal()(length(unique(D19200.tumor$trajectorycluster)))
+names(clustercolors) <- c("6","3","4","2","1","7","5")
+
+D19200.tumor <- CellCycleScoring(D19200.tumor,
+                                 s.features = cc.genes$s.genes,
+                                 g2m.features = cc.genes$g2m.genes,
+                                 assay="RNA")
+```
+
+# DoRothEA
+
+## Load regulons and expression data
+
+VIPER with Dorothea on all tumor cells
+
+```{r}
+library(dorothea)
+DefaultAssay(D19200.tumor) <- "SCT"
+regulon <- get(data(dorothea_hs, package = "dorothea"))
+
+set.seed(42)
+D19200.tumor <- run_viper(D19200.tumor, regulon,
+                                options = list(method = "scale",
+                                               pleiotropy = F, # default
+                                               nes = T, #default
+                                               bootstraps = 0, #default
+                                               minsize = 4, 
+                                               eset.filter = F,
+                                               cores = 4, 
+                                               verbose = T),
+                                assay_key = "SCT")
+
+#Define TFs based on confidence level
+DefaultAssay(D19200.tumor) <- "dorothea"
+
+allTFs <- rownames(D19200.tumor@assays$dorothea)
+regulonconf <- unique(as.data.frame(regulon)[,1:2])
+regulonconf <- regulonconf[match(allTFs,regulonconf$tf),]
+
+TFs <- list(ABCDE=rownames(D19200.tumor@assays$dorothea),
+            ABCD=regulonconf[regulonconf$confidence %in% c("A","B","C","D"),]$tf,
+            ABC=regulonconf[regulonconf$confidence %in% c("A","B","C"),]$tf,
+            AB=regulonconf[regulonconf$confidence %in% c("A","B"),]$tf,
+            A=regulonconf[regulonconf$confidence == "A",]$tf)
+
+EMTTFs <- c("ZEB1","ZEB2","SNAI1","SNAI2","TWIST1","TWIST2","HIF1A")
+```
+
+## Summarize cluster
+
+```{r}
+library(tidyr)
+library(tibble)
+library(dplyr)
+## Summarise cluster
+## We transform Viper scores, scaled by seurat, into a data frame to better 
+## handling the results
+viper_scores_df <- GetAssayData(D19200.tumor, 
+                                slot = "data", 
+                                assay = "dorothea") %>%
+  data.frame(check.names = F) %>%
+  t()
+
+## We create a data frame containing the cells and their clusters
+CellsClusters <- data.frame(cell = names(D19200.tumor$trajectorycluster), 
+                            cell_type = as.character(D19200.tumor$trajectorycluster),
+                            check.names = F)
+
+## We create a data frame with the Viper score per cell and its clusters
+viper_scores_clusters <- viper_scores_df  %>%
+  data.frame() %>% 
+  rownames_to_column("cell") %>%
+  gather(tf, activity, -cell) %>%
+  inner_join(CellsClusters)
+
+## We summarize the Viper scores by cellpopulation
+summarized_viper_scores <- viper_scores_clusters %>% 
+  group_by(tf, cell_type) %>%
+  summarise(avg = mean(activity),
+            std = sd(activity))
+
+dtsum.df <- reshape2::dcast(as.data.frame(summarized_viper_scores),tf ~ cell_type,value.var = "avg")
+rownames(dtsum.df) <- dtsum.df[,1]
+dtsum.df <- dtsum.df[,-1]
+```
+
+## Investigate EMT transcription factors
+
+### Visualization as Heatmap with each cell sorted by pseudotime
+
+```{r}
+library(RColorBrewer)
+library(ComplexHeatmap)
+D19200.tumor.temp <- D19200.tumor
+load(paste0(OUTPUT,"RData/D19200-tumornofibmono-pseudotimeseurat.RData"))
+ptcrv1 <- D19200.tumor$pca_SCT.crv1
+ptcrv2 <- D19200.tumor$pca_SCT.crv2
+D19200.tumor <- D19200.tumor.temp
+
+dtEMT <- D19200.tumor@assays$dorothea@data[EMTTFs,]
+colorbreaks.dtEMT <- c(min(dtEMT,na.rm = T),median(dtEMT[dtEMT<0]),0,median(dtEMT[dtEMT>0]),max(dtEMT,na.rm = T))
+
+#crv1
+#same ordering as heatmap data
+ptcrv1 <- ptcrv1[colnames(dtEMT)]
+bottomanno.ptcrv1 <- HeatmapAnnotation(df = data.frame(cluster=D19200.tumor$trajectorycluster[!is.na(ptcrv1)],
+                                                Phase=D19200.tumor$Phase[!is.na(ptcrv1)],
+                                                nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv1)],
+                                                nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv1)],
+                                                mito=D19200.tumor$percent.mito[!is.na(ptcrv1)],
+                                                hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv1)]),
+                                col = list(cluster = clustercolors,
+                                           nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
+                                           nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
+                                           mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
+                                           hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
+                                           Phase = c(G1=brewer.pal(3,"Set1")[1],
+                                                     G2M=brewer.pal(3,"Set1")[2],
+                                                     S=brewer.pal(3,"Set1")[3])),
+                                which = "column", annotation_name_side = "left")
+
+dtEMT.ptcrv1.hm <- Heatmap(dtEMT[,names(ptcrv1)[!is.na(ptcrv1)]],
+                    name="dorothea data",
+                    col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
+                    show_column_names = F,
+                    show_row_names = T,
+                    cluster_columns = F,
+                    #column_split = is.na(ptcrv1),
+                    column_order = names(ptcrv1[!is.na(ptcrv1)][order(ptcrv1[!is.na(ptcrv1)])]),
+                    cluster_rows = F,
+                    bottom_annotation = bottomanno.ptcrv1, 
+                    column_title_rot = 90,
+                    #column_gap = unit(1,"cm"),
+                    #graphic options
+                    row_names_gp = gpar(fontsize=11),
+                    column_names_gp = gpar(fontsize=11),
+                    row_title_gp = gpar(fontsize=11),
+                    heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                    border = T,
+                    width = unit(5,"in"),
+                    height = unit(2.5,"in"),
+                    use_raster = T,
+                    raster_device = "CairoPNG",
+                    raster_quality = 4
+)
+
+#crv 2
+#same ordering as heatmap data
+ptcrv2 <- ptcrv2[colnames(dtEMT)]
+
+#new bottom annotation
+bottomanno.ptcrv2 <- HeatmapAnnotation(df = data.frame(cluster=D19200.tumor$trajectorycluster[!is.na(ptcrv2)],
+                                                Phase=D19200.tumor$Phase[!is.na(ptcrv2)],
+                                                nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv2)],
+                                                nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv2)],
+                                                mito=D19200.tumor$percent.mito[!is.na(ptcrv2)],
+                                                hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv2)]),
+                                col = list(cluster = clustercolors,
+                                           nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
+                                           nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
+                                           mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
+                                           hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
+                                           Phase = c(G1=brewer.pal(3,"Set1")[1],
+                                                     G2M=brewer.pal(3,"Set1")[2],
+                                                     S=brewer.pal(3,"Set1")[3])),
+                                which = "column", annotation_name_side = "left")
+
+
+dtEMT.ptcrv2.hm <- Heatmap(dtEMT[,names(ptcrv2)[!is.na(ptcrv2)]],
+                    name="dorothea data",
+                    col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
+                    show_column_names = F,
+                    show_row_names = T,
+                    cluster_columns = F,
+                    #column_split = is.na(ptcrv1),
+                    column_order = names(ptcrv2[!is.na(ptcrv2)][order(ptcrv2[!is.na(ptcrv2)])]),
+                    cluster_rows = F,
+                    bottom_annotation = bottomanno.ptcrv2, 
+                    column_title_rot = 90,
+                    #column_gap = unit(1,"cm"),
+                    #graphic options
+                    row_names_gp = gpar(fontsize=11),
+                    column_names_gp = gpar(fontsize=11),
+                    row_title_gp = gpar(fontsize=11),
+                    heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                    border = T,
+                    width = unit(5,"in"),
+                    height = unit(2.5,"in"),
+                    use_raster = T,
+                    raster_device = "CairoPNG",
+                    raster_quality = 4
+)
+
+pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMT-HM-clusPCA-crv1.pdf"), width=10, height=10)
+dtEMT.ptcrv1.hm
+dev.off()
+
+pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMT-HM-clusPCA-crv2.pdf"), width=10, height=10)
+dtEMT.ptcrv2.hm
+dev.off()
+```
+
+### Visualization as Heatmap with summarised activity per cluster
+
+```{r}
+EMTdtsum.df <- dtsum.df[EMTTFs,]
+
+EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),
+                    -max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df))))/2,
+                    0,
+                    max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df))))/2,
+                    max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))))
+
+EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),0,max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))))
+
+EMTdtsum.df.hm.crv1 <- Heatmap(EMTdtsum.df[,1:5],
+                          name="dorothea sum",
+                          col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
+                          show_column_names = T,
+                          show_row_names = T,
+                          cluster_columns = F,
+                          cluster_rows = F,
+                          #graphic options
+                          row_names_gp = gpar(fontsize=11),
+                          column_names_gp = gpar(fontsize=11),
+                          row_title_gp = gpar(fontsize=11),
+                          heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                          border = T,
+                          heatmap_width = unit(4,"in"),
+                          heatmap_height = unit(4,"in"),
+                          use_raster = T,
+                          raster_device = "CairoPNG",
+                          raster_quality = 4
+)
+
+EMTdtsum.df.hm.crv2 <- Heatmap(EMTdtsum.df[,c(1:3,6,7)],
+                          name="dorothea sum",
+                          col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
+                          show_column_names = T,
+                          show_row_names = T,
+                          cluster_columns = F,
+                          cluster_rows = F,
+                          #graphic options
+                          row_names_gp = gpar(fontsize=11),
+                          column_names_gp = gpar(fontsize=11),
+                          row_title_gp = gpar(fontsize=11),
+                          heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                          border = T,
+                          heatmap_width = unit(4,"in"),
+                          heatmap_height = unit(4,"in"),
+                          use_raster = T,
+                          raster_device = "CairoPNG",
+                          raster_quality = 4
+)
+
+pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMTsum-HM-clusPCA-crv1.pdf"), width=10, height=10)
+EMTdtsum.df.hm.crv1
+dev.off()
+pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMTsum-HM-clusPCA-crv2.pdf"), width=10, height=10)
+EMTdtsum.df.hm.crv2
+dev.off()
+
+```
+
+### Visualizations as Violinplot
+
+```{r}
+dtEMT.m <- reshape2::melt(dtEMT)
+names(dtEMT.m) <- c("TF","cell","activity")
+dtEMT.m$Phase <- D19200.tumor$Phase[match(dtEMT.m$cell,names(D19200.tumor$Phase))]
+dtEMT.m$trajectorycluster <- D19200.tumor$trajectorycluster[match(dtEMT.m$cell,names(D19200.tumor$trajectorycluster))]
+
+#Visualize as Violin plot
+dtEMT.vln <- ggplot(data=dtEMT.m, aes(x=TF,y=activity,fill=trajectorycluster)) +
+  geom_boxplot(position="dodge",outlier.size = 0.5) +
+  scale_y_continuous(breaks = seq(-10,10,1)) +
+  scale_fill_manual(values = clustercolors) +
+  geom_hline(yintercept = 0,col="black") +
+  labs(x="", y="TF activity") +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMT-VLN-clusPCA.svg"),dtEMT.vln,width = 6,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMT-VLN-clusPCA-noleg.svg"),dtEMT.vln + theme(legend.position = "none") + ggtitle(""),width = 8,height = 5.5)
+```
+
+# Save 
+
+```{r}
+#save seurat object
+save(file = paste0(OUTPUT,"RData/D19200-tumornofibmono-dorothea.RData"),D19200.tumor)
+#save SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/08-D19200-tumornofibmono-dorothea-sessionInfo.txt"))
+```

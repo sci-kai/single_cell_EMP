@@ -1,0 +1,608 @@
+---
+title: "D19200 - tumor"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+#create theme to not duplicate code
+theme_jb <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5)
+     ))
+}
+
+theme_jb_nogrid <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid = element_blank(),
+       panel.border = element_blank(),
+       axis.line = element_line()
+     ))
+}
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/D19200/rp/"
+load(paste0(OUTPUT,"RData/D19200-filt.RData"))
+```
+
+## calculate cell cycle score
+
+```{r}
+#from Tirosh et al 2015 cell cycle genes, included in Seurat package
+#The "data" slot is always picked, based on RNA assay
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+D19200.filt <- CellCycleScoring(D19200.filt,
+                                 s.features = s.genes,
+                                 g2m.features = g2m.genes, 
+                                 assay="RNA")
+```
+
+# Subset tumor cells
+
+```{r}
+#by Cell type, in this example Tumor
+D19200.tumor <- subset(D19200.filt,cells = names(D19200.filt$CellType[D19200.filt$CellType == "Tumor"]))
+```
+
+# Normalization
+
+After subsetting of cells we have to re-run the preprocessing steps for Normalization, dimensionality reduction, etc. 
+This is needed, since the gene expression matrix is now reduced and enables more accurate capturing of the heterogeneity in the cells.
+Important: The slots, reductions and SCT assay saved in D19200.tumor are still from the non-subsetted object, therefore we will override these in the next steps.
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+DefaultAssay(D19200.tumor) <- "RNA"
+#log-normalization for slot "data"
+D19200.tumor <- NormalizeData(D19200.tumor, 
+                              normalization.method = "LogNormalize", #default
+                              scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                              assay = "RNA",
+                              margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+D19200.tumor <- FindVariableFeatures(D19200.tumor, 
+                                     assay = "RNA",
+                                     selection.method = "vst", #default
+                                     nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+allgenes <- rownames(D19200.tumor)
+D19200.tumor <- ScaleData(D19200.tumor, 
+                          features = allgenes, 
+                          do.scale = T,
+                          do.center = T,
+                          scale.max = 10,
+                          assay = "RNA")
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+D19200.tumor <- SCTransform(D19200.tumor, 
+                            assay="RNA", #default
+                            new.assay.name = "SCT", #default; overwrites old SCT
+                            do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                            variable.features.n = 3000, #default set variable features
+                            vars.to.regress = NULL, #default optional variables to regress out
+                            do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                            do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                            return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                            seed.use = 1448145)
+```
+
+# Dimensionality reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+D19200.tumor <- RunPCA(D19200.tumor, 
+                       npcs = 50,  #number of PCs to use
+                       assay = "SCT",
+                       rev.pca = F, # default, Run cell x gene matrix
+                       weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                       approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                       features = VariableFeatures(D19200.tumor,assay = "SCT"), #default
+                       reduction.name = "pca_SCT",
+                       verbose = F)
+```
+
+```{r PCA_elbow}
+#calculate the % variance explained
+PCAvar.SCT <- D19200.tumor@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(D19200.tumor@assays$SCT@scale.data)[VariableFeatures(D19200.tumor,assay = "SCT"),]))
+
+PCAplot.SCT <- DimPlot(D19200.tumor, reduction = "pca_SCT", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% of variance)"))
+
+PCAheatmap.SCT <- DimHeatmap(D19200.tumor, 
+                             dims = 1:20, 
+                             balanced = TRUE, 
+                             fast=F, 
+                             reduction = "pca_SCT",
+                             assays = "SCT",
+                             slot = "scale.data")
+
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal Component", y="% of Variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_bw()
+
+# just for your interest: cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal Component", y="% of cumulative Variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_bw()
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-PCA.svg"),PCAplot.SCT)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-PCA-heatmap.svg"),PCAheatmap.SCT, height=15)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-PCA-elbow.svg"),PCAelbowplot.SCT)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-PCA-variancesum.svg"),PCAsumplot.SCT)
+
+PCAplot.SCT
+PCAheatmap.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+here we perform two different clusterings, one based on the PCA of all cells and one from subsetted cells.
+- seurat_clusters_all_SCT_PCA:      "old" seurat clusters before subsetting (from preprocessing script)
+- seurat_clusters_tumor_SCT_PCA:    New seurat clusters from subsetting performed on PCA on SCT assay
+
+```{r FindClusters}
+numberofPCs = 20
+
+D19200.tumor$seurat_clusters_all_SCT_PCA <- D19200.tumor$seurat_clusters
+D19200.tumor$seurat_clusters <- NULL 
+  
+#based on PCA
+D19200.tumor <- FindNeighbors(D19200.tumor, 
+                                     dims = 1:numberofPCs, 
+                                     reduction = "pca_SCT",
+                                     assay = "SCT")
+D19200.tumor <- FindClusters(D19200.tumor, 
+                                    resolution = 0.8, #default 
+                                    random.seed=100)
+
+D19200.tumor$seurat_clusters_tumor_SCT_PCA <- D19200.tumor$seurat_clusters
+D19200.tumor$seurat_clusters <- NULL 
+
+#save new PCA with colored clusters 
+PCAplot.SCT.clus <- DimPlot(D19200.tumor,
+                            dims=1:2, 
+                            reduction="pca_SCT", 
+                            pt.size = 1, 
+                            group.by = "seurat_clusters_tumor_SCT_PCA") + 
+         labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% of variance)"),
+              y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% of variance)"))
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-PCA-clus.svg"),PCAplot.SCT.clus)
+PCAplot.SCT.clus
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+D19200.tumor <- RunUMAP(D19200.tumor,
+                        dims = 1:numberofPCs,
+                        assay = "SCT",
+                        umap.method = "uwot", # Seurat default
+                        graph=NULL, #default
+                        reduction="pca_SCT",
+                        reduction.name = "umap_SCT"
+)
+
+UMAP.SCT.clusPCA <- DimPlot(D19200.tumor, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_tumor_SCT_PCA") + theme(legend.position = "bottom")
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCT-UMAP-clusPCA.svg"),UMAP.SCT.clusPCA)
+UMAP.SCT.clusPCA
+```
+
+# Regress for cell cycle and repeat analysis
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#create new assay which is regressed for cell cycle
+D19200.tumor[["RNAcc"]] <- CreateAssayObject(counts=D19200.tumor@assays$RNA@counts)
+
+DefaultAssay(D19200.tumor) <- "RNAcc"
+#log-normalization for slot "data"
+D19200.tumor <- NormalizeData(D19200.tumor, 
+                              normalization.method = "LogNormalize", #default
+                              scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                              assay = "RNAcc",
+                              margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+D19200.tumor <- FindVariableFeatures(D19200.tumor, 
+                                     assay = "RNAcc",
+                                     selection.method = "vst", #default
+                                     nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+allgenes <- rownames(D19200.tumor)
+D19200.tumor <- ScaleData(D19200.tumor, 
+                          features = allgenes, 
+                          do.scale = T,
+                          do.center = T,
+                          scale.max = 10,
+                          assay = "RNAcc",
+                          vars.to.regress = c("S.Score","G2M.Score"))
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+D19200.tumor <- SCTransform(D19200.tumor, 
+                            assay="RNAcc", #default
+                            new.assay.name = "SCTcc", #default; overwrites old SCT
+                            do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                            variable.features.n = 3000, #default set variable features
+                            vars.to.regress = c("S.Score","G2M.Score"), #regress cell cycle
+                            do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                            do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                            return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                            seed.use = 1448145)
+```
+
+# Dimensionality reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+D19200.tumor <- RunPCA(D19200.tumor, 
+                       npcs = 50,  #number of PCs to use
+                       assay = "SCTcc",
+                       rev.pca = F, # default, Run cell x gene matrix
+                       weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                       approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                       features = VariableFeatures(D19200.tumor,assay = "SCTcc"), #default
+                       reduction.name = "pca_SCTcc",
+                       verbose = F)
+```
+
+```{r PCA_elbow}
+#calculate the % variance explained
+PCAvar.SCTcc <- D19200.tumor@reductions$pca_SCTcc@stdev^2 / sum(matrixStats::rowVars(as.matrix(D19200.tumor@assays$SCTcc@scale.data)[VariableFeatures(D19200.tumor,assay = "SCTcc"),]))
+
+PCAplot.SCTcc <- DimPlot(D19200.tumor, reduction = "pca_SCTcc", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTcc[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTcc[2]*100,digits = 2),"% of variance)"))
+
+PCAheatmap.SCTcc <- DimHeatmap(D19200.tumor, 
+                             dims = 1:20, 
+                             balanced = TRUE, 
+                             fast=F, 
+                             reduction = "pca_SCTcc",
+                             assays = "SCTcc",
+                             slot = "scale.data")
+
+PCAelbowplot.SCTcc <- ggplot(data=data.frame(var=PCAvar.SCTcc,
+                                           PC=1:length(PCAvar.SCTcc))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal Component", y="% of Variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_bw()
+
+# just for your interest: cumulative Variance Plot
+PCAsumplot.SCTcc <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTcc),PC=1:length(PCAvar.SCTcc))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal Component", y="% of cumulative Variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_bw()
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA.svg"),PCAplot.SCTcc)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA-heatmap.svg"),PCAheatmap.SCTcc, height=15)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA-elbow.svg"),PCAelbowplot.SCTcc)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA-variancesum.svg"),PCAsumplot.SCTcc)
+
+PCAplot.SCTcc
+PCAheatmap.SCTcc
+PCAelbowplot.SCTcc
+PCAsumplot.SCTcc
+```
+
+## Graph-based clustering
+
+here we perform two different clusterings, one based on the PCA of all cells and one from subsetted cells.
+- seurat_clusters_all_SCT_PCA:      "old" seurat clusters before subsetting (from preprocessing script)
+- seurat_clusters_tumor_SCT_PCA:    New seurat clusters from subsetting performed on PCA on SCT assay
+
+```{r FindClusters}
+numberofPCs = 20
+
+#based on PCA
+D19200.tumor <- FindNeighbors(D19200.tumor, 
+                                     dims = 1:numberofPCs, 
+                                     reduction = "pca_SCTcc",
+                                     assay = "SCTcc")
+D19200.tumor <- FindClusters(D19200.tumor, 
+                                    resolution = 0.8, #default 
+                                    random.seed=100)
+
+D19200.tumor$seurat_clusters_tumor_SCTcc_PCA <- D19200.tumor$seurat_clusters
+D19200.tumor$seurat_clusters <- NULL 
+
+#save new PCA with colored clusters 
+PCAplot.SCTcc.clus <- DimPlot(D19200.tumor,
+                            dims=1:2, 
+                            reduction="pca_SCTcc", 
+                            pt.size = 1, 
+                            group.by = "seurat_clusters_tumor_SCTcc_PCA") + 
+         labs(x=paste0("principal component 1 (",signif(PCAvar.SCTcc[1]*100,digits = 2),"% of variance)"),
+              y=paste0("principal component 2 (",signif(PCAvar.SCTcc[2]*100,digits = 2),"% of variance)"))
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA-clus.svg"),PCAplot.SCTcc.clus)
+PCAplot.SCTcc.clus
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+D19200.tumor <- RunUMAP(D19200.tumor,
+                        dims = 1:numberofPCs,
+                        assay = "SCTcc",
+                        umap.method = "uwot", # Seurat default
+                        graph=NULL, #default
+                        reduction="pca_SCTcc",
+                        reduction.name = "umap_SCTcc"
+)
+
+UMAP.SCTcc.clusPCA <- DimPlot(D19200.tumor, 
+                            reduction = "umap_SCTcc", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_tumor_SCTcc_PCA") + theme(legend.position = "bottom")
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-UMAP-clusPCA.svg"),UMAP.SCTcc.clusPCA)
+UMAP.SCTcc.clusPCA
+```
+
+## Adjust seurat cluster according to UMAP to capture also cluster of possible macrophages
+
+```{r}
+#based on UMAP; define one cluster by your own
+umapdata <- as.data.frame(D19200.tumor@reductions$umap_SCTcc@cell.embeddings)
+newclustercells <- rownames(umapdata[umapdata$umap_sctcc_1<(-1.8) & umapdata$umap_sctcc_2<(-3.2) & umapdata$umap_sctcc_1>(-4.2) | umapdata$umap_sctcc_1<(-1.8) & umapdata$umap_sctcc_2<(-2.7) & umapdata$umap_sctcc_1>(-3.5),])
+
+#editing to new clusters
+D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new <- as.character(D19200.tumor$seurat_clusters_tumor_SCTcc_PCA)
+D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new[newclustercells] <- as.character(max(as.numeric(unique(D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new)))+1)
+D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new <- factor(D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new)
+
+#save new PCA + UMAP with colored clusters 
+PCAplot.SCTcc.clusNEW <- DimPlot(D19200.tumor,
+                            dims=1:2, 
+                            reduction="pca_SCTcc", 
+                            pt.size = 1, 
+                            group.by = "seurat_clusters_tumor_SCTcc_PCA_new") + 
+         labs(x=paste0("principal component 1 (",signif(PCAvar.SCTcc[1]*100,digits = 2),"% of variance)"),
+              y=paste0("principal component 2 (",signif(PCAvar.SCTcc[2]*100,digits = 2),"% of variance)"))
+
+UMAP.SCTcc.clusPCAnew <- DimPlot(D19200.tumor, 
+                            reduction = "umap_SCTcc", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_tumor_SCTcc_PCA_new") + 
+  scale_x_continuous(breaks=seq(-10,10,1)) +
+  scale_y_continuous(breaks=seq(-10,10,0.5)) +
+  theme(legend.position = "bottom")
+
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-PCA-clusnew.svg"),PCAplot.SCTcc.clusNEW)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumor-SCTcc-UMAP-clusPCAnew.svg"),UMAP.SCTcc.clusPCAnew)
+PCAplot.SCTcc.clusNEW
+UMAP.SCTcc.clusPCAnew
+```
+
+# Differential Expression
+
+```{r}
+library(ggrepel)
+library(MAST)
+
+# Set the Idents to the clustering or splitting of cells for which you want to perform DGE
+Idents(D19200.tumor) <- NA
+Idents(D19200.tumor) <- D19200.tumor$seurat_clusters_tumor_SCTcc_PCA_new
+
+#Differential expression of every cluster against all other cluster
+D19200.tumor.marker <- FindAllMarkers(D19200.tumor,
+                                      assay = "RNA",
+                                      slot="data", 
+                                      test.use = "MAST", #alternative recommendation: MAST
+                                      random.seed=1,
+                                      logfc.threshold = 0, #shows the test results of all tested genes
+                                      min.pct=0.1, #default; prior filtering of tested genes applied!
+                                      latent.vars=NULL) # default; only for regression methods
+```
+
+# Volcano Plots 
+
+```{r}
+ggvolcanopct <- function(data,logFCthres) {
+  logFCthres_low <- logFCthres[1]
+  logFCthres_up <- logFCthres[2]
+  ggplot(data = data,
+         aes(x=avg_log2FC,
+             y=pct.1-pct.2,
+             col=pct.1-pct.2>logFCthres_up | pct.1-pct.2<logFCthres_low)) + 
+    geom_point() + 
+    geom_text_repel(aes(label=ifelse(pct.1-pct.2>logFCthres_up | pct.1-pct.2<logFCthres_low,as.character(data$gene),"")),
+                    max.overlaps = 100) +
+    scale_color_manual(values = c("TRUE"="red", "FALSE"="grey")) +
+    scale_x_continuous(breaks=seq(-10,10,0.5)) +
+    scale_y_continuous(breaks=seq(-1,1,0.1)) +
+    coord_cartesian(ylim = c(-1,1), xlim=c(-max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))-0.1,max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))+0.1)) + #symmetric x-axis and y-axis with short buffer
+    geom_hline(yintercept = 0, col="black", size=0.1) +
+    geom_vline(xintercept = 0, col="black", size=0.1) +
+    theme_jb() +
+    theme(legend.position = "none", panel.grid.minor = element_blank())
+}
+
+#take top 10 and bottom 10 based on pct difference
+thres_func_plot = function(x) {
+  c(sort(D19200.tumor.marker[D19200.tumor.marker$cluster==x,]$pct.1 - D19200.tumor.marker[D19200.tumor.marker$cluster==x,]$pct.2, decreasing = F)[11], 
+    sort(D19200.tumor.marker[D19200.tumor.marker$cluster==x,]$pct.1 - D19200.tumor.marker[D19200.tumor.marker$cluster==x,]$pct.2, decreasing = T)[11])
+}
+
+#create volcano plots with pct difference on y-axis
+D19200.tumor.marker.volpct <- lapply(levels(D19200.tumor.marker$cluster), function(x) ggvolcanopct(D19200.tumor.marker[D19200.tumor.marker$cluster==x,],thres_func_plot(x)) + ggtitle(x))
+names(D19200.tumor.marker.volpct) <- levels(D19200.tumor.marker$cluster)
+
+#save volcano plots
+for (i in names(D19200.tumor.marker.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumorcc-diffexprNEWclus-volcanopct-",i,".svg"),D19200.tumor.marker.volpct[[i]])
+}
+
+D19200.tumor.marker.volpct
+```
+
+## Heatmaps with only top differentially expressed genes based on PCT difference
+
+These plots may help interpreting each cluster, since you can see the top differentially expressed genes for each cluster and look them up, e.g. in genecards.org, to derive the function and the active gene expression program. 
+
+```{r}
+#number of topgenes to be plotted
+topgenes = 10
+
+#choose those top genes
+D19200.tumor.marker.percluster <- lapply(unique(D19200.tumor.marker$cluster), function(x) D19200.tumor.marker[D19200.tumor.marker$cluster==x,])
+names(D19200.tumor.marker.percluster) <- unique(D19200.tumor.marker$cluster)
+  
+top.pctdiff <- list()
+highlightgenes <- list()
+for (cl in names(D19200.tumor.marker.percluster)) {
+  top.pctdiff[[cl]] <- head(D19200.tumor.marker.percluster[[cl]][order(D19200.tumor.marker.percluster[[cl]]$pct.1 - D19200.tumor.marker.percluster[[cl]]$pct.2,decreasing = T),]$gene, n=topgenes)
+    highlightgenes[[cl]] <- data.frame(genes=top.pctdiff[[cl]], state=cl)
+}
+  
+# summarize in one dataframe
+highlightgenes <- as.data.frame(data.table::rbindlist(highlightgenes))
+
+expr.RNAccscaledata <- D19200.tumor@assays$RNAcc@scale.data  
+#subset expression matrix by highlight genes
+expr.RNAccscaledata.hl <- expr.RNAccscaledata[as.character(highlightgenes$genes),]
+#set colorbreaks as above
+colorbreaks.RNAccscaledata.hl <- c(-max(abs(expr.RNAccscaledata.hl)),
+                                    -(mean(unlist(abs(expr.RNAccscaledata.hl))[unlist(abs(expr.RNAccscaledata.hl))!=0]) + 2*sd(unlist(abs(expr.RNAccscaledata.hl))[unlist(abs(expr.RNAccscaledata.hl))!=0])),
+                                    0,
+                                    mean(unlist(abs(expr.RNAccscaledata.hl))[unlist(abs(expr.RNAccscaledata.hl))!=0]) + 2*sd(unlist(abs(expr.RNAccscaledata.hl))[unlist(abs(expr.RNAccscaledata.hl))!=0]),
+                                    max(abs(expr.RNAccscaledata.hl)))
+  
+# Bottom annotation 
+# Add cluster annotation as well as some quality metrices for each cell as annotation. need to adapt to
+colorfunc <- function(n) {
+  ifelse(n>9,
+         colors <- rainbow(n = n),
+         colors <- scales::hue_pal()(n)) 
+  colors
+}
+clustercolors <- colorfunc(length(unique(D19200.tumor$seurat_clusters_tumor_SCTcc_PCA)))
+names(clustercolors) <- seq(0,length(unique(D19200.tumor$seurat_clusters_tumor_SCTcc_PCA))-1,1)
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+bottomanno <- HeatmapAnnotation(df = data.frame(cluster=D19200.tumor$seurat_clusters_tumor_SCT_PCA,
+                                                nCount=D19200.tumor$nCount_RNA_log10,
+                                                nFeature=D19200.tumor$nFeature_RNA_log10,
+                                                mito=D19200.tumor$percent.mito,
+                                                hkgenes=D19200.tumor$n.exp.hkgenes,
+                                                Phase=D19200.tumor$Phase),
+                                col = list(cluster = clustercolors,
+                                           nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
+                                           nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
+                                           mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
+                                           hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
+                                           Phase = c(G1=brewer.pal(3,"Set1")[1],
+                                                     G2M=brewer.pal(3,"Set1")[2],
+                                                     S=brewer.pal(3,"Set1")[3])),
+                                which = "column", annotation_name_side = "left")
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster, columns split by seurat clusters
+diffexprhm.hl.clustered.split <- Heatmap(expr.RNAccscaledata.hl,
+                                   name="scale.data",
+                                   col=circlize::colorRamp2(breaks=colorbreaks.RNAccscaledata.hl, colors = c("red","purple", "black", "yellow","white")),
+                                   show_column_names = F,
+                                   show_row_names = T,
+                                   cluster_columns = T,
+                                   cluster_column_slices = F,
+                                   clustering_method_columns = "ward.D2",
+                                   clustering_distance_columns = "euclidean",
+                                   column_split = Idents(D19200.tumor),
+                                   row_split = factor(highlightgenes$state),
+                                   cluster_rows = T,
+                                   cluster_row_slices = F,
+                                   clustering_method_rows =  "ward.D2",
+                                   clustering_distance_rows = "euclidean",
+                                   row_title_rot = 0,
+                                   column_title_rot = 90,
+                                   bottom_annotation = bottomanno,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4)
+
+pdf(paste0(OUTPUT,"figs-D19200/D19200-tumorcc-diffexprNEWclus-HM-RNAscaledata-highlightgenes.pdf"), width=20, height=20)
+diffexprhm.hl.clustered.split
+dev.off()
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/D19200-tumor.RData"),D19200.tumor)
+#save marker object
+save(file = paste0(OUTPUT,"RData/D19200-tumor-marker.RData"),D19200.tumor)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/02-D19200-tumor-sessionInfo.txt"))
+```

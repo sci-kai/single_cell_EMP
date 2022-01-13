@@ -1,0 +1,139 @@
+---
+title: "D19200 - VeloCyto"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+#create theme to not duplicate code
+theme_jb <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid.minor = element_blank()
+     ))
+}
+
+theme_jb_nogrid <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid = element_blank(),
+       panel.border = element_blank(),
+       axis.line = element_line()
+     ))
+}
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/D19200/rp/"
+load(paste0(OUTPUT,"RData/D19200-tumornofibmono.RData"))
+```
+
+# Change seurat clusters to new numbers
+
+necessary for Violin Plots; numbers according to appaerance in trajectory
+
+```{r}
+D19200.tumor$trajectorycluster <- as.character(D19200.tumor$seurat_clusters_tumor_SCT_PCA)
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="0"] <- "6 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="1"] <- "3 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="2"] <- "4 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="3"] <- "2 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="4"] <- "1 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="5"] <- "7 temp"
+D19200.tumor$trajectorycluster[D19200.tumor$trajectorycluster=="6"] <- "5 temp"
+D19200.tumor$trajectorycluster <- sub(" temp","",D19200.tumor$trajectorycluster)
+D19200.tumor$trajectorycluster <- factor(D19200.tumor$trajectorycluster)
+```
+
+# VeloCyto analysis
+
+Following this tutorial: http://pklab.med.harvard.edu/velocyto/notebooks/R/SCG71.nb.html 
+
+```{r}
+library(velocyto.R)
+#read matrices
+ldat <- read.loom.matrices(paste0(OUTPUT,"velocyto/velocyto-firstSCC.loom"))
+
+emat <- ldat$spliced
+nmat <- ldat$unspliced
+
+#check histograms and distribution
+hist(log10(colSums(emat)),col='wheat',xlab='cell size')
+hist(log10(colSums(nmat)),col='wheat',xlab='cell size')
+
+#only get data from tumor cells
+tumorcells <- names(D19200.tumor$orig.ident)
+colnames(emat) <- paste0(sub("x","",sub("velocyto-firstSCC:","",colnames(emat))),"-1")
+colnames(nmat) <- paste0(sub("x","",sub("velocyto-firstSCC:","",colnames(nmat))),"-1")
+emat.t <- emat[,tumorcells]
+nmat.t <- nmat[,tumorcells]
+
+# take cluster labels and define colors
+cluster.label <- D19200.tumor$trajectorycluster 
+clustercoltraj <- scales::hue_pal()(7)
+names(clustercoltraj) <- c("6","3","4","2","1","7","5")
+cell.colors <- clustercoltraj[match(cluster.label,names(clustercoltraj))]
+names(cell.colors) <- names(cluster.label)
+
+# take embedding from umap
+emb <- D19200.tumor@reductions$umap_SCT@cell.embeddings[,1:2]
+
+#take distances from PCA
+cell.dist <- as.dist(1-armaCor(t(D19200.tumor@reductions$pca_SCT@cell.embeddings)))
+
+#filter genes based on the minimum average expression magnitude (in at least one of the clusters), output total number of resulting valid genes
+emat.t.f <- filter.genes.by.cluster.expression(emat.t,cluster.label,min.max.cluster.average = 0.05)
+nmat.t.f <- filter.genes.by.cluster.expression(nmat.t,cluster.label,min.max.cluster.average = 0.02)
+
+#how many genes are left?
+nrow(emat.t.f)
+nrow(nmat.t.f)
+
+#Estimate RNA velocity (using gene-relative model with k=50 cell kNN pooling and using top/bottom 2% quantiles for gamma fit):
+rvel.cd <- gene.relative.velocity.estimates(emat.t.f,
+                                            nmat.t.f,
+                                            deltaT=1,
+                                            kCells=50,
+                                            cell.dist=cell.dist,
+                                            fit.quantile=0.02)
+
+pdf(paste0(OUTPUT,"figs-D19200/velocyto_umap_SCT.pdf"),width=5,height=5)
+show.velocity.on.embedding.cor(emb,
+                               vel = rvel.cd,
+                               n=200,
+                               scale='sqrt',
+                               cell.colors=cell.colors,
+                               cex=0.5,
+                               arrow.scale=2,
+                               show.grid.flow=TRUE,
+                               min.grid.cell.mass=0.5,
+                               grid.n=50,
+                               arrow.lwd=1,
+                               do.par=F,
+                               cell.border.alpha = 0
+)
+dev.off()
+```
+
+```{r}
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/06-D19200-tumornofibmono-velocyto-sessionInfo.txt"))
+```

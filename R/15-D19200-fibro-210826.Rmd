@@ -1,0 +1,336 @@
+---
+title: "D19200 - fibro"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+#create theme to not duplicate code
+theme_jb <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5)
+     ))
+}
+
+theme_jb_nogrid <- function(base_size=11) {
+  (theme_bw() +
+     theme(
+       axis.title = element_text(size=11),
+       axis.text = element_text(size=11),
+       legend.text = element_text(size=11),
+       #optional rotation of x-axis labels
+       axis.text.x = element_text(angle=90, hjust=1,vjust=.5),
+       panel.grid = element_blank(),
+       panel.border = element_blank(),
+       axis.line = element_line()
+     ))
+}
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/D19200/rp/"
+load(paste0(OUTPUT,"RData/D19200-filt.RData"))
+```
+
+# Subset Cells
+
+```{r}
+D19200.f <- subset(D19200.filt,cells = names(D19200.filt$CellType[D19200.filt$CellType == "Fibroblasts"]))
+```
+
+
+# Normalization
+
+After subsetting of cells we have to re-run the preprocessing steps for Normalization, dimensionality reduction, etc. 
+This is needed, since the gene expression matrix is now reduced and enables more accurate capturing of the heterogeneity in the cells.
+Important: The slots, reductions and SCT assay saved in D19200.f are still from the non-subsetted object, therefore we will override these in the next steps.
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(D19200.f) <- "RNA"
+#log-normalization for slot "data"
+D19200.f <- NormalizeData(D19200.f, 
+                          normalization.method = "LogNormalize", #default
+                          scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                          assay = "RNA",
+                          margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+D19200.f <- FindVariableFeatures(D19200.f, 
+                                 assay = "RNA",
+                                 selection.method = "vst", #default
+                                 nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+allgenes <- rownames(D19200.f)
+D19200.f <- ScaleData(D19200.f, 
+                      features = allgenes, 
+                      do.scale = T,
+                      do.center = T,
+                      scale.max = 10,
+                      assay = "RNA")
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+D19200.f <- SCTransform(D19200.f, 
+                            assay="RNA", #default
+                            new.assay.name = "SCT", #default; overwrites old SCT
+                            do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                            variable.features.n = 3000, #default set variable features
+                            vars.to.regress = NULL, #default optional variables to regress out
+                            do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                            do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                            return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                            seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+D19200.f <- RunPCA(D19200.f, 
+                   npcs = 50,  #number of PCs to use
+                   assay = "SCT",
+                   rev.pca = F, # default, Run cell x gene matrix
+                   weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                   approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                   features = VariableFeatures(D19200.f,assay = "SCT"), #default
+                   reduction.name = "pca_SCT",
+                   verbose = F)
+```
+
+
+```{r}
+PCAvar.SCT <- D19200.f@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(D19200.f@assays$SCT@scale.data)[VariableFeatures(D19200.f,assay = "SCT"),]))
+
+PCAplot.SCT <- DimPlot(D19200.f, reduction = "pca_SCT", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+PCAheatmap.SCT <- DimHeatmap(D19200.f, 
+                             dims = 1:20, 
+                             balanced = TRUE, 
+                             fast=F, 
+                             reduction = "pca_SCT",
+                             assays = "SCT",
+                             slot = "scale.data",combine = F) 
+PCAheatmap.SCT <- lapply(PCAheatmap.SCT, function(x) x + theme_jb() + theme(axis.text.x = element_blank(), axis.line.x = element_blank()))
+
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+lapply(1:length(PCAheatmap.SCT), function(x) ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-heatmap-PC",x,".svg"),PCAheatmap.SCT[[x]], height=5, width=5))
+lapply(1:length(PCAheatmap.SCT), function(x) ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-heatmap-PC",x,"-noleg.svg"),PCAheatmap.SCT[[x]] + theme(legend.position = "none"), height=5, width=5))
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAplot.SCT
+PCAheatmap.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+here we perform two different clusterings, one based on the PCA of all cells, one of the fibroblasts
+
+- seurat_clusters_all_SCT_PCA:      "old" seurat clusters before subsetting (from preprocessing script)
+- seurat_clusters_fibro_SCT_PCA:    New seurat clusters from subsetting performed on PCA on SCT assay
+
+```{r FindClusters}
+numberofPCs = 20
+
+D19200.f$seurat_clusters_all_SCT_PCA <- D19200.f$seurat_clusters
+D19200.f$seurat_clusters <- NULL 
+  
+#based on PCA
+D19200.f <- FindNeighbors(D19200.f, 
+                          dims = 1:numberofPCs, 
+                          reduction = "pca_SCT",
+                          assay = "SCT")
+D19200.f <- FindClusters(D19200.f, 
+                         resolution = 0.8, #default 
+                         random.seed=100)
+
+D19200.f$seurat_clusters_fibro_SCT_PCA <- D19200.f$seurat_clusters
+D19200.f$seurat_clusters <- NULL 
+
+#save new PCA with colored clusters 
+PCAplot.SCT.clus <- DimPlot(D19200.f,
+                            dims=1:2, 
+                            reduction="pca_SCT", 
+                            pt.size = 1, 
+                            group.by = "seurat_clusters_fibro_SCT_PCA") + 
+         labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% of variance)"),
+              y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-clus.svg"),PCAplot.SCT.clus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-PCA-clus.svg"),PCAplot.SCT.clus + theme(legend.position = "none") + labs(title = NULL) + ggtitle(NULL), width = 5, height = 5)
+PCAplot.SCT.clus
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+D19200.f <- RunUMAP(D19200.f,
+                    dims = 1:numberofPCs,
+                    assay = "SCT",
+                    umap.method = "uwot", # Seurat default
+                    graph=NULL, #default
+                    reduction="pca_SCT",
+                    reduction.name = "umap_SCT"
+)
+
+UMAP.SCT.clusPCA <- DimPlot(D19200.f, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_fibro_SCT_PCA") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-UMAP-clusPCA.svg"),UMAP.SCT.clusPCA, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-UMAP-clusPCA.svg"),UMAP.SCT.clusPCA + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+UMAP.SCT.clusPCA
+```
+
+# Cell Cycle
+
+```{r}
+D19200.f <- CellCycleScoring(D19200.f,
+                             s.features = cc.genes$s.genes,
+                             g2m.features = cc.genes$g2m.genes, 
+                             assay="RNA")
+
+UMAP.SCT.phase <- DimPlot(D19200.f, 
+                          reduction = "umap_SCT", 
+                          pt.size = 1, 
+                          group.by = "Phase") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-SCT-UMAP-phase.svg"),UMAP.SCT.phase,width=5,height=5)
+UMAP.SCT.phase
+```
+
+# Differential Expression
+
+As recommended by Seurat FAQ, we should use the RNA assay and NOT the pearson residuals of the SCT assay (inside of "scale.data" slot) https://github.com/satijalab/seurat/discussions/4032.
+
+*Slot to use*
+It is default and recommended to use the "data" slot of either RNA assay or SCT assay, since the counts are corrected for the sequencing depth. 
+Mostly the log Foldchange is used in downstream analysis. The log Foldchange depends on the used slot! 
+It is also to note, that the pct.1 and pct.2 values change if you use the RNA or SCT assay.
+
+*Test to use*
+Standard method is to use "wilcox". I use MAST since it is also recommended by Theis et al. (https://doi.org/10.15252/msb.20188746) and performs well in a general single cell DE review https://doi.org/10.1038/nmeth.4612, that was recommended in the Seurat tutorial. The test does not create as inflated p-values as with wilcox test.
+
+*PCT option*
+The general review also recommends a min.pct of 25%, but since this only excludes genes from testing, I would rather recommend the default of 0.1 to not miss too many information.
+
+```{r}
+# Set the Idents to the clustering or splitting of cells for which you want to perform DGE
+Idents(D19200.f) <- NA
+Idents(D19200.f) <- D19200.f$seurat_clusters_fibro_SCT_PCA
+
+#Differential expression of every cluster against all other cluster
+D19200.f.marker <- FindAllMarkers(D19200.f,
+                                  assay = "RNA",
+                                  slot="data", 
+                                  test.use = "MAST", #alternative recommendation: MAST
+                                  random.seed=1,
+                                  logfc.threshold = 0, #shows the test results of all tested genes
+                                  min.pct=0.1, #default; prior filtering of tested genes applied!
+                                  latent.vars=NULL) # default; only for regression methods
+```
+
+# Volcano Plots 
+
+```{r}
+ggvolcanopct <- function(data,logFCthres) {
+  logFCthres_low <- logFCthres[1]
+  logFCthres_up <- logFCthres[2]
+  ggplot(data = data,
+         aes(x=avg_log2FC,
+             y=pct.1-pct.2,
+             col=avg_log2FC>logFCthres_up | avg_log2FC<logFCthres_low)) + 
+    geom_point() + 
+    geom_text_repel(aes(label=ifelse(avg_log2FC>logFCthres_up | avg_log2FC<logFCthres_low,as.character(gene),"")),
+                    max.overlaps = 100) +
+    scale_color_manual(values = c("TRUE"="red", "FALSE"="grey")) +
+    scale_x_continuous(breaks=seq(-10,10,0.5)) +
+    scale_y_continuous(breaks=seq(-1,1,0.1)) +
+    coord_cartesian(ylim = c(-1,1), xlim=c(-max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))-0.1,max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))+0.1)) + #symmetric x-axis and y-axis with short buffer
+    geom_hline(yintercept = 0, col="black", size=0.1) +
+    geom_vline(xintercept = 0, col="black", size=0.1) +
+    theme_jb() +
+    theme(legend.position = "none", panel.grid.minor = element_blank())
+}
+#set thres function for selecting genes to mark in volcano plot
+thres_func_plot = function(x) {
+  c(sort(D19200.f.marker[D19200.f.marker$cluster==x,]$avg_log2FC, decreasing = F)[11], 
+    sort(D19200.f.marker[D19200.f.marker$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+
+#create volcano plots with pct difference on y-axis
+D19200.f.marker.volpct <- lapply(levels(D19200.f.marker$cluster), function(x) ggvolcanopct(D19200.f.marker[D19200.f.marker$cluster==x,],thres_func_plot(x)) + ggtitle(x))
+names(D19200.f.marker.volpct) <- levels(D19200.f.marker$cluster)
+
+#save volcano plots
+for (i in names(D19200.f.marker.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-fibro-diffexpr-volcanopct-",i,".svg"),D19200.f.marker.volpct[[i]])
+}
+
+D19200.f.marker.volpct
+```
+
+# Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/D19200-fibro.RData"),D19200.f)
+save(file = paste0(OUTPUT,"RData/D19200-fibro-diffexpr-marker.RData"),D19200.f.marker)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/15-D19200-fibro-sessionInfo.txt"))
+```
