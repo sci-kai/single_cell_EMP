@@ -631,6 +631,25 @@ positivelogFCgenestype.final <- lapply(positivelogFCgenestype,function(x) {
 })
 positivelogFCgenestype.final <- as.data.frame(data.table::rbindlist(positivelogFCgenestype.final))
 
+#split up al duplicated genes again. i.e., genes that are in at least two clusters. Put them in both!
+uebertrag <- positivelogFCgenestype.final[positivelogFCgenestype.final$numberofstates==1,]
+uebertrag$cluster <- as.character(uebertrag$cluster)
+tosplit <- positivelogFCgenestype.final[positivelogFCgenestype.final$numberofstates>1,]
+tosplit$cluster <- as.character(tosplit$cluster)
+
+splitted <- as.data.frame(data.table::rbindlist(lapply(1:nrow(tosplit),function(x) {
+  data.table::rbindlist(lapply(1:tosplit[x,]$numberofstates, function(y) {
+    temp <- tosplit[x,] 
+    temp$cluster <- strsplit(temp$cluster,split=", ")[[1]][y]
+    temp$avg_log2FC <- strsplit(temp$avg_log2FC,split=", ")[[1]][y]
+    temp$numberofstates <- 1
+    temp
+  }))
+})))
+
+positivelogFCgenestype.final <- rbind(uebertrag,splitted)
+positivelogFCgenestype.final$cluster <- factor(positivelogFCgenestype.final$cluster)
+
 #for sorting heatmap by foldchange; if multiple foldchanges for one gene, take always the first on (which is from the first cluster)  
 positivelogFCgenestype.final.sort <- positivelogFCgenestype.final
 if (max(positivelogFCgenestype.final.sort$numberofstates)>1) {
@@ -668,7 +687,7 @@ diffexprhm.clustered.split <- Heatmap(expr.RNAscaledata.type.alldiffgenes,
                                       cluster_rows = F,
                                       cluster_row_slices = F,
                                       row_order = rownames(expr.RNAscaledata.type.alldiffgenes)[order(positivelogFCgenestype.final.sort$avg_log2FC,decreasing = T)],
-                                      row_title_rot = 0,
+                                      row_title_rot = 90,
                                       column_title_rot = 90,
                                       bottom_annotation = bottomanno,
                                       #graphic options

@@ -168,7 +168,7 @@ topgenes <- lapply(names(D19200.tumor.marker.percluster), function(cl) {head(D19
 topgenes <- unlist(topgenes)
 
 #manually defined important genes (e.g. EMT genes)
-impgenes <- c("SFN","KRT14","KRT5","KRT17","HSPA1A","APOBEC3A","APOBEC3B","PSCA","ENO1","ENO2","ENO3","ALDOA","PGK1","PFKP","NDRG1","SERPINE1","LAMB3","TIMP3","VIM","CDH1","CDH2","TGFBI","EPCAM","CDH13","FN1")
+impgenes <- c("SFN","KRT14","KRT5","KRT17","HSPA1A","APOBEC3A","APOBEC3B","PSCA","ENO1","ENO2","ENO3","ALDOA","PGK1","PFKP","NDRG1","EGLN3","SERPINE1","LAMB3","TIMP3","VIM","CDH1","CDH2","TGFBI","EPCAM","CDH13","FN1")
 
 #transcription factors
 TFs <- c("ZEB1", "ZEB2", "TWIST1", "TWIST2","SNAI1","SNAI2","HIF1A")
@@ -186,7 +186,7 @@ lapply(names(ptexpr), function(x) ggsave(filename = paste0(OUTPUT,"figs-D19200/D
 lapply(names(ptexpr), function(x) ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-RNAdata-ptexpr-",x,"-noleg.svg"),ptexpr[[x]] + theme(legend.position = "none"),width = 2.5,height = 2.5))
 
 #supplementary genes in larger size
-impgenes_supp <- c("FN1","CDH2","MMP1","MMP13","IFITM1","EGR1","S100A7","S100A9","KRT16","KLK5","KLK6","KRT13","KRT15","THBS1","MT2A","ENO2","ENO3","ALDOA","PGK1","PFKP","EGLN3","ASNS")
+impgenes_supp <- c("FN1","CDH2","MMP1","MMP13","IFITM1","EGR1","S100A7","S100A9","KRT16","KLK5","KLK6","KRT13","KRT15","THBS1","MT2A","ENO2","ENO3","ALDOA","PGK1","PFKP","ASNS")
 
 ptexpr.crv1.l <- lapply(impgenes_supp, function(gene) pseudotimeexpression(gene=gene,crv=1))
 names(ptexpr.crv1.l) <- paste0("crv1-",impgenes_supp)
@@ -218,11 +218,11 @@ expr.RNAdata <- D19200.tumor@assays$RNA@data
 TF.perc <- unlist(lapply(TFs, function(TF) sum(expr.RNAdata[TF,]>0) / length(expr.RNAdata[TF,]>0)))
 names(TF.perc) <- TFs
 
-TF.perc.barplot <- ggplot(mapping = aes(x=names(TF.perc),y=TF.perc)) +
+TF.perc.barplot <- ggplot(mapping = aes(x=factor(names(TF.perc),levels=names(TF.perc)),y=TF.perc)) +
   geom_bar(stat="identity") +
   coord_cartesian(ylim=c(0,1)) +
   scale_y_continuous(breaks=seq(0,1,0.1)) +
-  labs(x="transcription factor", y="% expr. cells") +
+  labs(x="", y="% expr. cells") +
   theme_jb()
 ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-RNAdata-TF-perc.svg"),TF.perc.barplot,width = 4,height = 2.5)
 ```
