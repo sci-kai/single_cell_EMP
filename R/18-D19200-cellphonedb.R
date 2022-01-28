@@ -178,17 +178,20 @@ intact$partner <- gsub("Dendritic.Cells","DendriticCells",intact$partner)
 
 library(ggplot2)
 #Interaction Dotplot
-intact.map <- ggplot(data=intact,aes(x=partner,y=interacting_pair, col=log2(mean), size=-log10(pval))) + 
+intact.map <- ggplot(data=intact,aes(x=interacting_pair, y=partner, col=log2(mean), size=-log10(pval))) + 
   geom_point() + 
+  scale_y_discrete(position = "right") +
   theme_jb() + 
-  theme(axis.text.x = element_text(angle = -90,hjust=0,vjust=0.5))
-ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-intmap.svg"),intact.map,width=10,height=30)
+  theme(axis.text.x = element_text(angle = 90,hjust=1,vjust=0.5))
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-intmap.svg"),intact.map,width=30,height=10)
 
 #special look at EGFR interactions
-intact.map.specific <- ggplot(data=intact[unique(c(grep("EGFR",intact$interacting_pair),grep("VEGFA",intact$interacting_pair),grep("TGFB",intact$interacting_pair))),],aes(x=partner,y=interacting_pair, col=log2(mean), size=-log10(pval))) + 
+intact.map.specific <- ggplot(data=intact[unique(c(grep("EGFR",intact$interacting_pair),grep("VEGFA",intact$interacting_pair),grep("TGFB",intact$interacting_pair))),],
+                              aes(x=interacting_pair, y=partner, col=log2(mean), size=-log10(pval))) + 
   geom_point() + 
+  scale_y_discrete(position = "right") +
   theme_jb() + 
-  theme(axis.text.x = element_text(angle = -90,hjust=0,vjust=0.5))
+  theme(axis.text.x = element_text(angle = 90,hjust=1,vjust=0.5))
 ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-intmap-specific.svg"),intact.map.specific,width=10,height=10)
 
 ############
@@ -223,18 +226,21 @@ intact.sub$pval <- as.numeric(intact.sub$pval)
 intact.sub$partner <- gsub("Endothelial.Cells","EndothelialCells",intact.sub$partner)
 intact.sub$partner <- gsub("Dendritic.Cells","DendriticCells",intact.sub$partner)
 
-intact.sub.map <- ggplot(data=intact.sub,aes(x=partner,y=interacting_pair, col=log2(mean), size=-log10(pval))) + 
+intact.sub.map <- ggplot(data=intact.sub,aes(x=interacting_pair, y=partner, col=log2(mean), size=-log10(pval))) + 
   geom_point() + 
+  scale_y_discrete(position = "right") +
   theme_jb() + 
-  theme(axis.text.x = element_text(angle = -90,hjust=0,vjust=0.5))
+  theme(axis.text.x = element_text(angle = 90,hjust=1,vjust=0.5))
 ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-allclusters-intmap.png"),intact.sub.map,width=30,height=30)
 
 #special look at specific interactions
-intact.sub.map.specific <- ggplot(data=intact.sub[unique(c(grep("EGFR",intact.sub$interacting_pair),grep("VEGFA",intact.sub$interacting_pair),grep("TGFB",intact.sub$interacting_pair))),],aes(x=partner,y=interacting_pair, col=log2(mean), size=-log10(pval))) + 
+intact.sub.map.specific <- ggplot(data=intact.sub[unique(c(grep("EGFR",intact.sub$interacting_pair),grep("VEGFA",intact.sub$interacting_pair),grep("TGFB",intact.sub$interacting_pair))),],
+                                  aes(x=interacting_pair,y=partner, col=log2(mean), size=-log10(pval))) + 
   geom_point() + 
+  scale_y_discrete(position = "right") +
   theme_jb() + 
-  theme(axis.text.x = element_text(angle = -90,hjust=0,vjust=0.5))
-ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-allclusters-intmap-specific.svg"),intact.sub.map.specific,width=30,height=10)
+  theme(axis.text.x = element_text(angle = 90,hjust=1,vjust=0.5))
+ggsave(filename = paste0(OUTPUT,"figs-D19200/D19200-cpdb-allclusters-intmap-specific.svg"),intact.sub.map.specific,width=10,height=30)
 
 #Count Interactions and show as lineplot
 #calculate number of interactions: those interactions with p-value less than 0.05 are counted as interacting

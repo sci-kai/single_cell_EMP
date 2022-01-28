@@ -174,7 +174,6 @@ lapply(names(GOBP.gsea), function(x) cbind(x,GOBP.gsea[[x]][order(GOBP.gsea[[x]]
 ## Gene Ontology: Hallmarks pathways
 
 ```{r}
-library(fgsea)
 HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
 
 HM.gsea <- list()

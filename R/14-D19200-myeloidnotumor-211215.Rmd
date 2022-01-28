@@ -43,7 +43,7 @@ theme_jb_nogrid <- function(base_size=11) {
 
 ```{r}
 OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/D19200/rp/"
-load(paste0(OUTPUT,"RData/D19200-mynot.RData"))
+load(paste0(OUTPUT,"RData/D19200-my.RData"))
 ```
 
 # Subset Cells

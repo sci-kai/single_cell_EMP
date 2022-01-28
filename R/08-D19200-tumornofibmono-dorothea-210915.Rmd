@@ -86,15 +86,15 @@ regulon <- get(data(dorothea_hs, package = "dorothea"))
 
 set.seed(42)
 D19200.tumor <- run_viper(D19200.tumor, regulon,
-                                options = list(method = "scale",
-                                               pleiotropy = F, # default
-                                               nes = T, #default
-                                               bootstraps = 0, #default
-                                               minsize = 4, 
-                                               eset.filter = F,
-                                               cores = 4, 
-                                               verbose = T),
-                                assay_key = "SCT")
+                          options = list(method = "scale",
+                                         pleiotropy = F, # default
+                                         nes = T, #default
+                                         bootstraps = 0, #default
+                                         minsize = 4, 
+                                         eset.filter = F,
+                                         cores = 4, 
+                                         verbose = T),
+                          assay_key = "SCT")
 
 #Define TFs based on confidence level
 DefaultAssay(D19200.tumor) <- "dorothea"
@@ -110,6 +110,56 @@ TFs <- list(ABCDE=rownames(D19200.tumor@assays$dorothea),
             A=regulonconf[regulonconf$confidence == "A",]$tf)
 
 EMTTFs <- c("ZEB1","ZEB2","SNAI1","SNAI2","TWIST1","TWIST2","HIF1A")
+```
+
+Target overlap
+```{r}
+EMTTFtargets <- lapply(EMTTFs,function(x) regulon[regulon$tf %in% x,]$target)
+names(EMTTFtargets) <- EMTTFs
+
+targetoverlap <- lapply(EMTTFtargets,function(y) data.frame(t(unlist(lapply(EMTTFtargets,function(x) length(intersect(y,x)) / length(y))))))
+targetoverlap <- as.data.frame(data.table::rbindlist(targetoverlap))
+rownames(targetoverlap) <- names(targetoverlap)
+
+#size of targets
+library(ComplexHeatmap)
+rightanno <- HeatmapAnnotation(size=unlist(lapply(EMTTFtargets,length)),
+                               size_text=anno_text(unlist(lapply(EMTTFtargets,length))),
+                               col = list(size=circlize::colorRamp2(breaks=c(0,max(unlist(lapply(EMTTFtargets,length)))),colors = c("white","blue"))),
+                               which="row", annotation_name_side = "bottom",annotation_name_gp = gpar(fontsize=11))
+bottomanno <- HeatmapAnnotation(size=unlist(lapply(EMTTFtargets,length)),
+                                size_text=anno_text(unlist(lapply(EMTTFtargets,length))),
+                                col = list(size=circlize::colorRamp2(breaks=c(0,max(unlist(lapply(EMTTFtargets,length)))),colors = c("white","blue"))),
+                                which="column", annotation_name_side = "left",annotation_name_gp = gpar(fontsize=11))
+
+#relative to rows (i.e., EMT TF in row is 100% of targets)
+tov <- Heatmap(targetoverlap*100,
+               name="percentage of overlapping targets",
+               column_title = "EMT TF",
+               row_title = "EMT TF (relative to rows, i.e., rows are 100% or targets)",
+               column_title_side = "bottom",
+               col=circlize::colorRamp2(breaks=c(0,100), colors = c("white","red")),
+               cluster_columns = F,
+               cluster_rows = F,
+               cell_fun = function(j, i, x, y, width, height, fill) {
+                 grid.text(sprintf("%.0f", (targetoverlap*100)[i, j]), x, y, gp = gpar(fontsize = 10))},
+               right_annotation = rightanno,
+               bottom_annotation = bottomanno,
+               #graphic options
+               row_names_gp = gpar(fontsize=11),
+               column_names_gp = gpar(fontsize=11),
+               row_title_gp = gpar(fontsize=11),
+               heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+               border = T,
+               use_raster = T,
+               raster_device = "CairoPNG",
+               raster_quality = 4,
+               width = unit(5,"in"),
+               height = unit(5,"in"))
+
+pdf(paste0(OUTPUT,"figs-D19200/D19200-EMTTF-targetsfromdorothea-ov.pdf"), width=20, height=20)
+tov
+dev.off()
 ```
 
 ## Summarize cluster
@@ -170,44 +220,44 @@ colorbreaks.dtEMT <- c(min(dtEMT,na.rm = T),median(dtEMT[dtEMT<0]),0,median(dtEM
 #same ordering as heatmap data
 ptcrv1 <- ptcrv1[colnames(dtEMT)]
 bottomanno.ptcrv1 <- HeatmapAnnotation(df = data.frame(cluster=D19200.tumor$trajectorycluster[!is.na(ptcrv1)],
-                                                Phase=D19200.tumor$Phase[!is.na(ptcrv1)],
-                                                nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv1)],
-                                                nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv1)],
-                                                mito=D19200.tumor$percent.mito[!is.na(ptcrv1)],
-                                                hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv1)]),
-                                col = list(cluster = clustercolors,
-                                           nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
-                                           nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
-                                           mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
-                                           hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
-                                           Phase = c(G1=brewer.pal(3,"Set1")[1],
-                                                     G2M=brewer.pal(3,"Set1")[2],
-                                                     S=brewer.pal(3,"Set1")[3])),
-                                which = "column", annotation_name_side = "left")
+                                                       Phase=D19200.tumor$Phase[!is.na(ptcrv1)],
+                                                       nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv1)],
+                                                       nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv1)],
+                                                       mito=D19200.tumor$percent.mito[!is.na(ptcrv1)],
+                                                       hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv1)]),
+                                       col = list(cluster = clustercolors,
+                                                  nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
+                                                  nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
+                                                  mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
+                                                  hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
+                                                  Phase = c(G1=brewer.pal(3,"Set1")[1],
+                                                            G2M=brewer.pal(3,"Set1")[2],
+                                                            S=brewer.pal(3,"Set1")[3])),
+                                       which = "column", annotation_name_side = "left")
 
 dtEMT.ptcrv1.hm <- Heatmap(dtEMT[,names(ptcrv1)[!is.na(ptcrv1)]],
-                    name="dorothea data",
-                    col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
-                    show_column_names = F,
-                    show_row_names = T,
-                    cluster_columns = F,
-                    #column_split = is.na(ptcrv1),
-                    column_order = names(ptcrv1[!is.na(ptcrv1)][order(ptcrv1[!is.na(ptcrv1)])]),
-                    cluster_rows = F,
-                    bottom_annotation = bottomanno.ptcrv1, 
-                    column_title_rot = 90,
-                    #column_gap = unit(1,"cm"),
-                    #graphic options
-                    row_names_gp = gpar(fontsize=11),
-                    column_names_gp = gpar(fontsize=11),
-                    row_title_gp = gpar(fontsize=11),
-                    heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                    border = T,
-                    width = unit(5,"in"),
-                    height = unit(2.5,"in"),
-                    use_raster = T,
-                    raster_device = "CairoPNG",
-                    raster_quality = 4
+                           name="dorothea data",
+                           col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
+                           show_column_names = F,
+                           show_row_names = T,
+                           cluster_columns = F,
+                           #column_split = is.na(ptcrv1),
+                           column_order = names(ptcrv1[!is.na(ptcrv1)][order(ptcrv1[!is.na(ptcrv1)])]),
+                           cluster_rows = F,
+                           bottom_annotation = bottomanno.ptcrv1, 
+                           column_title_rot = 90,
+                           #column_gap = unit(1,"cm"),
+                           #graphic options
+                           row_names_gp = gpar(fontsize=11),
+                           column_names_gp = gpar(fontsize=11),
+                           row_title_gp = gpar(fontsize=11),
+                           heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                           border = T,
+                           width = unit(5,"in"),
+                           height = unit(2.5,"in"),
+                           use_raster = T,
+                           raster_device = "CairoPNG",
+                           raster_quality = 4
 )
 
 #crv 2
@@ -216,45 +266,45 @@ ptcrv2 <- ptcrv2[colnames(dtEMT)]
 
 #new bottom annotation
 bottomanno.ptcrv2 <- HeatmapAnnotation(df = data.frame(cluster=D19200.tumor$trajectorycluster[!is.na(ptcrv2)],
-                                                Phase=D19200.tumor$Phase[!is.na(ptcrv2)],
-                                                nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv2)],
-                                                nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv2)],
-                                                mito=D19200.tumor$percent.mito[!is.na(ptcrv2)],
-                                                hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv2)]),
-                                col = list(cluster = clustercolors,
-                                           nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
-                                           nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
-                                           mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
-                                           hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
-                                           Phase = c(G1=brewer.pal(3,"Set1")[1],
-                                                     G2M=brewer.pal(3,"Set1")[2],
-                                                     S=brewer.pal(3,"Set1")[3])),
-                                which = "column", annotation_name_side = "left")
+                                                       Phase=D19200.tumor$Phase[!is.na(ptcrv2)],
+                                                       nCount=D19200.tumor$nCount_RNA_log10[!is.na(ptcrv2)],
+                                                       nFeature=D19200.tumor$nFeature_RNA_log10[!is.na(ptcrv2)],
+                                                       mito=D19200.tumor$percent.mito[!is.na(ptcrv2)],
+                                                       hkgenes=D19200.tumor$n.exp.hkgenes[!is.na(ptcrv2)]),
+                                       col = list(cluster = clustercolors,
+                                                  nCount = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nCount_RNA_log10)),colors = c("black","yellow")),
+                                                  nFeature = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$nFeature_RNA_log10)),colors = c("black","yellow")),
+                                                  mito = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$percent.mito)),colors = c("black","yellow")),
+                                                  hkgenes = circlize::colorRamp2(breaks=c(0,max(D19200.tumor$n.exp.hkgenes)),colors = c("black","yellow")),
+                                                  Phase = c(G1=brewer.pal(3,"Set1")[1],
+                                                            G2M=brewer.pal(3,"Set1")[2],
+                                                            S=brewer.pal(3,"Set1")[3])),
+                                       which = "column", annotation_name_side = "left")
 
 
 dtEMT.ptcrv2.hm <- Heatmap(dtEMT[,names(ptcrv2)[!is.na(ptcrv2)]],
-                    name="dorothea data",
-                    col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
-                    show_column_names = F,
-                    show_row_names = T,
-                    cluster_columns = F,
-                    #column_split = is.na(ptcrv1),
-                    column_order = names(ptcrv2[!is.na(ptcrv2)][order(ptcrv2[!is.na(ptcrv2)])]),
-                    cluster_rows = F,
-                    bottom_annotation = bottomanno.ptcrv2, 
-                    column_title_rot = 90,
-                    #column_gap = unit(1,"cm"),
-                    #graphic options
-                    row_names_gp = gpar(fontsize=11),
-                    column_names_gp = gpar(fontsize=11),
-                    row_title_gp = gpar(fontsize=11),
-                    heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                    border = T,
-                    width = unit(5,"in"),
-                    height = unit(2.5,"in"),
-                    use_raster = T,
-                    raster_device = "CairoPNG",
-                    raster_quality = 4
+                           name="dorothea data",
+                           col=circlize::colorRamp2(breaks=colorbreaks.dtEMT, colors = c("blue","purple", "black", "yellow","orange")),
+                           show_column_names = F,
+                           show_row_names = T,
+                           cluster_columns = F,
+                           #column_split = is.na(ptcrv1),
+                           column_order = names(ptcrv2[!is.na(ptcrv2)][order(ptcrv2[!is.na(ptcrv2)])]),
+                           cluster_rows = F,
+                           bottom_annotation = bottomanno.ptcrv2, 
+                           column_title_rot = 90,
+                           #column_gap = unit(1,"cm"),
+                           #graphic options
+                           row_names_gp = gpar(fontsize=11),
+                           column_names_gp = gpar(fontsize=11),
+                           row_title_gp = gpar(fontsize=11),
+                           heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                           border = T,
+                           width = unit(5,"in"),
+                           height = unit(2.5,"in"),
+                           use_raster = T,
+                           raster_device = "CairoPNG",
+                           raster_quality = 4
 )
 
 pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMT-HM-clusPCA-crv1.pdf"), width=10, height=10)
@@ -280,43 +330,43 @@ EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),
 EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),0,max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))))
 
 EMTdtsum.df.hm.crv1 <- Heatmap(EMTdtsum.df[,1:5],
-                          name="dorothea sum",
-                          col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
-                          show_column_names = T,
-                          show_row_names = T,
-                          cluster_columns = F,
-                          cluster_rows = F,
-                          #graphic options
-                          row_names_gp = gpar(fontsize=11),
-                          column_names_gp = gpar(fontsize=11),
-                          row_title_gp = gpar(fontsize=11),
-                          heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                          border = T,
-                          heatmap_width = unit(4,"in"),
-                          heatmap_height = unit(4,"in"),
-                          use_raster = T,
-                          raster_device = "CairoPNG",
-                          raster_quality = 4
+                               name="dorothea sum",
+                               col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
+                               show_column_names = T,
+                               show_row_names = T,
+                               cluster_columns = F,
+                               cluster_rows = F,
+                               #graphic options
+                               row_names_gp = gpar(fontsize=11),
+                               column_names_gp = gpar(fontsize=11),
+                               row_title_gp = gpar(fontsize=11),
+                               heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                               border = T,
+                               heatmap_width = unit(4,"in"),
+                               heatmap_height = unit(4,"in"),
+                               use_raster = T,
+                               raster_device = "CairoPNG",
+                               raster_quality = 4
 )
 
 EMTdtsum.df.hm.crv2 <- Heatmap(EMTdtsum.df[,c(1:3,6,7)],
-                          name="dorothea sum",
-                          col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
-                          show_column_names = T,
-                          show_row_names = T,
-                          cluster_columns = F,
-                          cluster_rows = F,
-                          #graphic options
-                          row_names_gp = gpar(fontsize=11),
-                          column_names_gp = gpar(fontsize=11),
-                          row_title_gp = gpar(fontsize=11),
-                          heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                          border = T,
-                          heatmap_width = unit(4,"in"),
-                          heatmap_height = unit(4,"in"),
-                          use_raster = T,
-                          raster_device = "CairoPNG",
-                          raster_quality = 4
+                               name="dorothea sum",
+                               col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
+                               show_column_names = T,
+                               show_row_names = T,
+                               cluster_columns = F,
+                               cluster_rows = F,
+                               #graphic options
+                               row_names_gp = gpar(fontsize=11),
+                               column_names_gp = gpar(fontsize=11),
+                               row_title_gp = gpar(fontsize=11),
+                               heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                               border = T,
+                               heatmap_width = unit(4,"in"),
+                               heatmap_height = unit(4,"in"),
+                               use_raster = T,
+                               raster_device = "CairoPNG",
+                               raster_quality = 4
 )
 
 pdf(paste0(OUTPUT,"figs-D19200/D19200-tumornofibmono-dtEMTsum-HM-clusPCA-crv1.pdf"), width=10, height=10)
