@@ -1,0 +1,479 @@
+---
+title: "Merge cells"
+author: "Kai"
+date: "6th April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+# Load all Seurat Objects from preprocessing
+
+```{r}
+#patient 1
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/RData/patient1-filt.RData")
+#patient 2
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient2/RData/patient2.RData")
+#patient 3
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient3/RData/patient3.RData")
+#patient 4
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient4/RData/patient4.RData")
+#patient 5
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient5/RData/patient5.RData")
+#patient 6
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient6/6a/RData/patient6a.RData")
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient6/6b/RData/patient6b.RData")
+#patient 7
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient7/7a/RData/patient7a.RData")
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient7/7b/RData/patient7b.RData")
+```
+
+## Rename Tumors and Idents
+
+```{r}
+#orig.ident as patient ID
+patient1.filt$orig.ident <- "patient1"
+
+#hash.ID as sample ID
+#patient1
+patient1.filt$hash.ID.man <- "1"
+#patient2
+patient2.filt$hash.ID.man <- as.character(patient2.filt$hash.ID.man)
+patient2.filt$hash.ID.man[patient2.filt$hash.ID.man == "Negative"] <-  "2.Negative"
+patient2.filt$hash.ID.man[patient2.filt$hash.ID.man == "Doublet"] <-  "2.Doublet"
+patient2.filt$hash.ID.man <- factor(patient2.filt$hash.ID.man,levels=c("2.1","2.2","2.3","2.Negative","2.Doublet"))
+#patient3
+patient3.filt$hash.ID.man <- "3"
+#patient4
+patient4.filt$hash.ID.man <- as.character(patient4.filt$hash.ID.man)
+patient4.filt$hash.ID.man[patient4.filt$hash.ID.man == "Negative"] <-  "4.Negative"
+patient4.filt$hash.ID.man[patient4.filt$hash.ID.man == "Doublet"] <-  "4.Doublet"
+patient4.filt$hash.ID.man <- factor(patient4.filt$hash.ID.man,levels=c("4.1","4.2","4.3","4.Negative","4.Doublet"))
+#patient5
+patient5.filt$hash.ID.man <- "5"
+
+#patient6a
+patient6a.filt$hash.ID.man <- as.character(patient6a.filt$hash.ID.man)
+patient6a.filt$hash.ID.man[patient6a.filt$hash.ID.man == "Negative"] <-  "6a.Negative"
+patient6a.filt$hash.ID.man[patient6a.filt$hash.ID.man == "Doublet"] <-  "6a.Doublet"
+patient6a.filt$hash.ID.man <- factor(patient6a.filt$hash.ID.man,levels=c("6.1","6.2","6.3","6a.Negative","6a.Doublet"))
+
+#patient6b.filt
+patient6b.filt$hash.ID.man <- as.character(patient6b.filt$hash.ID.man)
+patient6b.filt$hash.ID.man[patient6b.filt$hash.ID.man == "Negative"] <-  "6b.Negative"
+patient6b.filt$hash.ID.man[patient6b.filt$hash.ID.man == "Doublet"] <-  "6b.Doublet"
+patient6b.filt$hash.ID.man <- factor(patient6b.filt$hash.ID.man,levels=c("6.4","6.5","6.6","6b.Negative","6b.Doublet"))
+
+#patient7a.filt
+patient7a.filt$hash.ID.man <- as.character(patient7a.filt$hash.ID.man)
+patient7a.filt$hash.ID.man[patient7a.filt$hash.ID.man == "Negative"] <-  "7a.Negative"
+patient7a.filt$hash.ID.man[patient7a.filt$hash.ID.man == "Doublet"] <-  "7a.Doublet"
+patient7a.filt$hash.ID.man <- factor(patient7a.filt$hash.ID.man,levels=c("7.1","7.2","7.3","7a.Negative","7a.Doublet"))
+
+#patient7b.filt
+patient7b.filt$hash.ID.man <- as.character(patient7b.filt$hash.ID.man)
+patient7b.filt$hash.ID.man[patient7b.filt$hash.ID.man == "Negative"] <-  "7b.Negative"
+patient7b.filt$hash.ID.man[patient7b.filt$hash.ID.man == "Doublet"] <-  "7b.Doublet"
+patient7b.filt$hash.ID.man <- factor(patient7b.filt$hash.ID.man,levels=c("7.4","7.5","7.6","7b.Negative","7b.Doublet"))
+```
+
+# Merge all Cells
+
+```{r}
+patient1.filt.new = CreateSeuratObject(counts = patient1.filt@assays$RNA@counts)
+patient1.filt.new$orig.ident <- patient1.filt$orig.ident
+patient1.filt.new$hash.ID.man <- patient1.filt$hash.ID.man
+patient1.filt.new$CellType_ss <- patient1.filt$CellType
+patient2.filt.new = CreateSeuratObject(counts = patient2.filt@assays$RNA@counts)
+patient2.filt.new$orig.ident <- patient2.filt$orig.ident
+patient2.filt.new$hash.ID.man <- patient2.filt$hash.ID.man
+patient2.filt.new$CellType_ss <- patient2.filt$CellType
+patient3.filt.new = CreateSeuratObject(counts = patient3.filt@assays$RNA@counts)
+patient3.filt.new$orig.ident <- patient3.filt$orig.ident
+patient3.filt.new$hash.ID.man <- patient3.filt$hash.ID.man
+patient3.filt.new$CellType_ss <- patient3.filt$CellType
+patient4.filt.new = CreateSeuratObject(counts = patient4.filt@assays$RNA@counts)
+patient4.filt.new$orig.ident <- patient4.filt$orig.ident
+patient4.filt.new$hash.ID.man <- patient4.filt$hash.ID.man
+patient4.filt.new$CellType_ss <- patient4.filt$CellType
+patient5.filt.new = CreateSeuratObject(counts = patient5.filt@assays$RNA@counts)
+patient5.filt.new$orig.ident <- patient5.filt$orig.ident
+patient5.filt.new$hash.ID.man <- patient5.filt$hash.ID.man
+patient5.filt.new$CellType_ss <- patient5.filt$CellType
+patient6a.filt.new = CreateSeuratObject(counts = patient6a.filt@assays$RNA@counts)
+patient6a.filt.new$orig.ident <- patient6a.filt$orig.ident
+patient6a.filt.new$hash.ID.man <- patient6a.filt$hash.ID.man
+patient6a.filt.new$CellType_ss <- patient6a.filt$CellType
+patient6b.filt.new = CreateSeuratObject(counts = patient6b.filt@assays$RNA@counts)
+patient6b.filt.new$orig.ident <- patient6b.filt$orig.ident
+patient6b.filt.new$hash.ID.man <- patient6b.filt$hash.ID.man
+patient6b.filt.new$CellType_ss <- patient6b.filt$CellType
+patient7a.filt.new = CreateSeuratObject(counts = patient7a.filt@assays$RNA@counts)
+patient7a.filt.new$orig.ident <- patient7a.filt$orig.ident
+patient7a.filt.new$hash.ID.man <- patient7a.filt$hash.ID.man
+patient7a.filt.new$CellType_ss <- patient7a.filt$CellType
+patient7b.filt.new = CreateSeuratObject(counts = patient7b.filt@assays$RNA@counts)
+patient7b.filt.new$orig.ident <- patient7b.filt$orig.ident
+patient7b.filt.new$hash.ID.man <- patient7b.filt$hash.ID.man
+patient7b.filt.new$CellType_ss <- patient7b.filt$CellType
+
+SCC <- merge(x = patient1.filt.new,
+             y = list(patient2.filt.new,
+                   patient3.filt.new,
+                   patient4.filt.new,
+                   patient5.filt.new,
+                   patient6a.filt.new,
+                   patient6b.filt.new,
+                   patient7a.filt.new,
+                   patient7b.filt.new))
+```
+
+#Remove unnecessary objects prior to RAM-intensive normalization (restart R to get free workspace afterwards)
+
+```{r}
+rm(patient1.filt,patient1.filt.new)
+rm(patient2.filt,patient2.filt.new)
+rm(patient3.filt,patient3.filt.new)
+rm(patient4.filt,patient4.filt.new)
+rm(patient5.filt,patient5.filt.new)
+rm(patient6a.filt,patient6a.filt.new)
+rm(patient6b.filt,patient6b.filt.new)
+rm(patient7a.filt,patient7a.filt.new)
+rm(patient7b.filt,patient7b.filt.new)
+```
+
+## Annotate patients
+
+```{r}
+#libraries for batch correction
+SCC$lib <- sub("patient","",SCC$orig.ident)
+#patient
+SCC$patient <- sub("patient","",SCC$orig.ident)
+SCC$patient[SCC$patient=="6a"] <- "6"
+SCC$patient[SCC$patient=="6b"] <- "6"
+SCC$patient[SCC$patient=="7a"] <- "7"
+SCC$patient[SCC$patient=="7b"] <- "7"
+#sample
+SCC$hash.ID <- SCC$hash.ID.man
+SCC$hash.ID <- factor(SCC$hash.ID)
+SCC$sample <- SCC$hash.ID.man
+SCC$sample[grep("Negative",SCC$sample)] <- "Negative"
+SCC$sample[grep("Doublet",SCC$sample)] <- "Doublet"
+SCC$sample <- factor(SCC$sample)
+#Lokalisation
+SCC$Lok <- as.character(SCC$hash.ID)
+SCC$Lok[SCC$Lok=="1"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="2.1"] <- "PT"
+SCC$Lok[SCC$Lok=="2.2"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="2.3"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="2.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="2.Negative"] <- "NA"
+SCC$Lok[SCC$Lok=="3"] <- "PT"
+SCC$Lok[SCC$Lok=="4.1"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="4.2"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="4.3"] <- "LN"
+SCC$Lok[SCC$Lok=="4.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="4.Negative"] <- "NA"
+SCC$Lok[SCC$Lok=="5"] <- "PT"
+SCC$Lok[SCC$Lok=="6.1"] <- "PT"
+SCC$Lok[SCC$Lok=="6.2"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="6.3"] <- "LN"
+SCC$Lok[SCC$Lok=="6a.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="6a.Negative"] <- "NA"
+SCC$Lok[SCC$Lok=="6.4"] <- "PT"
+SCC$Lok[SCC$Lok=="6.5"] <- "LN"
+SCC$Lok[SCC$Lok=="6.6"] <- "LN"
+SCC$Lok[SCC$Lok=="6b.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="6b.Negative"] <- "NA"
+SCC$Lok[SCC$Lok=="7.1"] <- "PT"
+SCC$Lok[SCC$Lok=="7.2"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="7.3"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="7a.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="7a.Negative"] <- "NA"
+SCC$Lok[SCC$Lok=="7.4"] <- "PT"
+SCC$Lok[SCC$Lok=="7.5"] <- "LN"
+SCC$Lok[SCC$Lok=="7.6"] <- "LN-MET"
+SCC$Lok[SCC$Lok=="7b.Doublet"] <- "NA"
+SCC$Lok[SCC$Lok=="7b.Negative"] <- "NA"
+#Add information about sequencing technology
+SCC$technology <- SCC$patient
+SCC$technology[SCC$technology=="1"] <- "5' single"
+SCC$technology[SCC$technology=="2"] <- "5' hashing"
+SCC$technology[SCC$technology=="3"] <- "5' single"
+SCC$technology[SCC$technology=="4"] <- "3' hashing"
+SCC$technology[SCC$technology=="5"] <- "5' single"
+SCC$technology[SCC$technology=="6"] <- "3' hashing"
+SCC$technology[SCC$technology=="7"] <- "3' hashing"
+
+#global classification
+SCC$hash.global <- as.character(SCC$sample)
+SCC$hash.global[!SCC$hash.global %in% c("Doublet","Negative")] <- "Singlet"
+
+#delete unnecessary columns
+SCC$orig.ident <- NULL
+SCC$hash.ID.man <- NULL
+```
+
+# Normalization with SCTransform
+
+```{r SCC_normalization}
+SCC <- SCTransform(SCC, 
+                   ncells = ncol(SCC),
+                   assay="RNA", #default
+                   new.assay.name = "SCT", #default; overwrites old SCT
+                   do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                   variable.features.n = 3000, #default set variable features
+                   vars.to.regress = NULL, #default optional variables to regress out
+                   do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                   do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                   return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                   seed.use = 1448145)
+
+# Save SCT normalized seurat object
+save(file = paste0(OUTPUT,"RData/SCC-SCTSeurat.RData"),SCC)
+```
+
+# Add basic annotations
+
+```{r}
+SCC$nCount_RNA_log10 <- log10(SCC$nCount_RNA)
+SCC$nFeature_RNA_log10 <- log10(SCC$nFeature_RNA)
+
+#from Tirosh et al 2015 cell cycle genes, included in Seurat package
+#The "data" slot is always picked, based on RNA assay
+SCC <- CellCycleScoring(SCC,
+                        s.features = cc.genes.updated.2019$s.genes,
+                        g2m.features = cc.genes.updated.2019$g2m.genes, 
+                        assay="SCT")
+
+#Assign the expression of mitochondrial and housekeeping genes
+#houskeeping genes are e.g. ribosomal proteins, expressed in nearly every cell and less sensitive to high dropout.
+# relative expression of mitochondrial gene as metric for damaged cells
+SCC[["percent.mito"]] <- PercentageFeatureSet(SCC, pattern = "^MT-") 
+#read in names of housekeeper genes
+hkgenes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1) 
+# remove hkgenes that were not found (maybe not in the reference or got lost)
+hkgenes.found <- which(toupper(rownames(SCC)) %in% toupper(hkgenes))
+# sum of hk genes for each cell
+hk_per_cell <- Matrix::colSums(GetAssayData(SCC)[hkgenes.found, ] > 0)
+SCC <- AddMetaData(object = SCC, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+rm(hk_per_cell,hkgenes.found)
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+SCC <- RunPCA(SCC, 
+              npcs = 50,  #number of PCs to use
+              assay = "SCT",
+              rev.pca = F, # default, Run cell x gene matrix
+              weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+              approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+              features = VariableFeatures(SCC,assay = "SCT"), #default
+              reduction.name = "pca_SCT",
+              verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCT <- SCC@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC@assays$SCT@scale.data)[VariableFeatures(SCC,assay = "SCT"),]))
+
+PCAplot.SCT <- DimPlot(SCC, reduction = "pca_SCT", dims = c(1,2), group.by = "patient") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% of variance)")) +
+  theme_jb()
+
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+#cumulative variance plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+#based on PCA
+SCC <- FindNeighbors(SCC, 
+                     dims = 1:numberofPCs, 
+                     reduction = "pca_SCT",
+                     assay = "SCT")
+SCC <- FindClusters(SCC, 
+                    resolution = 0.8,
+                    random.seed=100)
+
+SCC$seurat_clusters_all_SCT_PCA <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+SCC <- RunUMAP(SCC,
+               dims = 1:numberofPCs,
+               assay = "SCT",
+               umap.method = "uwot", # Seurat default
+               graph=NULL, #default
+               reduction="pca_SCT",
+               reduction.name = "umap_SCT"
+)
+```
+
+```{r}
+UMAP.SCT.clusPCA <- DimPlot(SCC, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_all_SCT_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.celltypess <- DimPlot(SCC, 
+                           reduction = "umap_SCT", 
+                           pt.size = 1, 
+                           label = F, 
+                           group.by = "CellType_ss") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.sample <- DimPlot(SCC, 
+                           reduction = "umap_SCT", 
+                           pt.size = 1, 
+                           label = F, 
+                           group.by = "sample") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.patient <- DimPlot(SCC, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = F, 
+                            group.by = "patient") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.hashID <- DimPlot(SCC, 
+                           reduction = "umap_SCT", 
+                           pt.size = 1, 
+                           label = F, 
+                           group.by = "hash.ID") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+UMAP.SCT.hashglobal <- DimPlot(SCC, 
+                               reduction = "umap_SCT", 
+                               pt.size = 1, 
+                               label = F, 
+                               group.by = "hash.global") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.Lok <- DimPlot(SCC, 
+                        reduction = "umap_SCT", 
+                        pt.size = 1, 
+                        label = F, 
+                        group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.tech <- DimPlot(SCC, 
+                         reduction = "umap_SCT", 
+                         pt.size = 1, 
+                         label = F, 
+                         group.by = "technology") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.lib <- DimPlot(SCC, 
+                          reduction = "umap_SCT", 
+                          pt.size = 1, 
+                          label = F, 
+                          group.by = "lib") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.QC <- FeaturePlot(SCC, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCT", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           order = T,
+                           slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-clusPCA.svg"),UMAP.SCT.clusPCA,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-CellType-ss.svg"),UMAP.SCT.celltypess,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-sample.svg"),UMAP.SCT.sample,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-patient.svg"),UMAP.SCT.patient,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-hashID.svg"),UMAP.SCT.hashID,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-hashglobal.svg"),UMAP.SCT.hashglobal,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-Lok.svg"),UMAP.SCT.Lok,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-lib.svg"),UMAP.SCT.lib,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-technology.svg"),UMAP.SCT.tech,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-QC.svg"),UMAP.SCT.QC,width = 5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-clusPCA-noleg.svg"),UMAP.SCT.clusPCA + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-CellType-ss-noleg.svg"),UMAP.SCT.celltypess + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-sample-noleg.svg"),UMAP.SCT.sample + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-patient-noleg.svg"),UMAP.SCT.patient + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-hashID-noleg.svg"),UMAP.SCT.hashID + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-hashglobal-noleg.svg"),UMAP.SCT.hashglobal + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-Lok-noleg.svg"),UMAP.SCT.Lok + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-lib-noleg.svg"),UMAP.SCT.lib + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-technology-noleg.svg"),UMAP.SCT.tech + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCC-all-SCT-UMAP-QC-noleg.svg"),UMAP.SCT.QC + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+
+UMAP.SCT.clusPCA
+UMAP.SCT.celltypess
+UMAP.SCT.sample
+UMAP.SCT.patient
+UMAP.SCT.hashID
+UMAP.SCT.hashglobal
+UMAP.SCT.Lok
+UMAP.SCT.tech
+UMAP.SCT.lib
+UMAP.SCT.QC
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCC.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCC-sessionInfo.txt"))
+```

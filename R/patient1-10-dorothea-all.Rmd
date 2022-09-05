@@ -1,0 +1,227 @@
+---
+title: "patient1 - dorothea"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(dorothea)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(dplyr)
+library(RColorBrewer)
+library(ComplexHeatmap)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Code to run dorothea on cluster
+
+```{r eval=FALSE, include=FALSE}
+Rdir="/omics/groups/OE0460/internal/Kai2/R-4.1.0-packages"
+library("Seurat", lib.loc=Rdir)
+library("dorothea",lib.loc=Rdir)
+
+OUTPUT = "/omics/groups/OE0460/internal/Kai2/patient1-dorothea/"
+
+load(paste0(OUTPUT,"patient1-filt.RData"))
+patient1.filt <- SCTransform(patient1.filt, 
+                              ncells=ncol(patient1.filt), #default  
+                              assay="RNA", #default
+                              new.assay.name = "SCT", #default; overwrites old SCTccmito
+                              do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                              variable.features.n = 3000, #default set variable features
+                              vars.to.regress = NULL, #default optional variables to regress out
+                              do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                              do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                              return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                              seed.use = 1448145)
+
+#Dorothea
+DefaultAssay(patient1.filt) <- "SCT"
+regulon <- get(data(dorothea_hs, package = "dorothea"))
+
+set.seed(42)
+patient1.filt <- run_viper(patient1.filt, regulon,
+                 options = list(method = "scale",
+                                pleiotropy = F, # default
+                                nes = T, #default
+                                bootstraps = 0, #default
+                                minsize = 4, 
+                                eset.filter = F,
+                                cores = 30, 
+                                verbose = T),
+                 assay_key = "SCT")
+
+save(file = paste0(OUTPUT,"patient1-all-dorothea.RData"),patient1.filt)                         
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"patient1-all-dorothea-sessionInfo.txt"))
+
+```
+
+# DoRothEA analysis
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-all-dorothea.RData"))
+
+# Annotation with tumortype
+patient1.filt$tumortype <- as.character(patient1.filt$CellType)
+
+load(paste0(OUTPUT,"RData/patient1-tumor.RData"))
+patient1.filt$tumortype[names(patient1.tumor$CellType_tumor[patient1.tumor$CellType_tumor!="Tumor"])] <- as.character(patient1.tumor$CellType_tumor[patient1.tumor$CellType_tumor!="Tumor"])
+load(paste0(OUTPUT,"RData/patient1-tumorfilt-typeanalysis.RData"))
+patient1.filt$tumortype[names(patient1.tumor$tumortype)] <- as.character(patient1.tumor$tumortype)
+
+patient1.filt$tumortype <- factor(patient1.filt$tumortype,levels = c(levels(patient1.filt$CellType),levels(patient1.tumor$tumortype)))
+
+DefaultAssay(patient1.filt) <- "dorothea"
+EMTTFs <- c("ZEB1","ZEB2","SNAI1","SNAI2","TWIST1","TWIST2")
+```
+
+## Summarize cluster
+
+```{r}
+## Summarise cluster
+## We transform Viper scores, scaled by seurat, into a data frame to better 
+## handling the results
+viper_scores_df <- GetAssayData(patient1.filt, 
+                                slot = "data", 
+                                assay = "dorothea") %>%
+  data.frame(check.names = F) %>%
+  t()
+
+## We create a data frame containing the cells and their clusters
+CellsClusters <- data.frame(cell = names(patient1.filt$tumortype), 
+                            cell_type = patient1.filt$tumortype,
+                            check.names = F)
+
+## We create a data frame with the Viper score per cell and its clusters
+viper_scores_clusters <- viper_scores_df  %>%
+  data.frame() %>% 
+  rownames_to_column("cell") %>%
+  gather(tf, activity, -cell) %>%
+  inner_join(CellsClusters)
+
+## We summarize the Viper scores by cellpopulation
+summarized_viper_scores <- viper_scores_clusters %>% 
+  group_by(tf, cell_type) %>%
+  summarise(avg = mean(activity),
+            std = sd(activity))
+
+dtsum.df <- reshape2::dcast(as.data.frame(summarized_viper_scores),tf ~ cell_type,value.var = "avg")
+rownames(dtsum.df) <- dtsum.df[,1]
+dtsum.df <- dtsum.df[,-1]
+```
+
+## Visualization as Heatmap with summarised activity per cluster
+
+```{r}
+EMTdtsum.df <- dtsum.df[EMTTFs,]
+
+EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),
+                    -max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df))))/2,
+                    0,
+                    max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df))))/2,
+                    max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))))
+
+EMTdtsum.df.cb <- c(-max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))),0,max(c(abs(min(EMTdtsum.df)),abs(max(EMTdtsum.df)))))
+
+EMTdtsum.df.hm <- Heatmap(EMTdtsum.df,
+                          name=" ",
+                          col=circlize::colorRamp2(breaks=EMTdtsum.df.cb, colors = c("purple", "black", "yellow")),
+                          show_column_names = T,
+                          show_row_names = T,
+                          cluster_columns = F,
+                          cluster_rows = F,
+                          #graphic options
+                          row_names_gp = gpar(fontsize=11),
+                          column_names_gp = gpar(fontsize=11),
+                          row_title_gp = gpar(fontsize=11),
+                          heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                          border = T,
+                          use_raster = T,
+                          raster_device = "CairoPNG",
+                          raster_quality = 4,
+                          width = unit(4,"in"),
+                          height = unit(2,"in")
+)
+
+pdf(paste0(OUTPUT,"figs/patient1-all-dtEMTsum-HM-tumortype.pdf"), width=10, height=10)
+EMTdtsum.df.hm
+dev.off()
+```
+
+# check repressor and active TFs
+
+```{r}
+regulon <- get(data(dorothea_hs, package = "dorothea"))
+regulon <- as.data.frame(regulon)
+regulon$mor <- factor(regulon$mor)
+mordis <- lapply(unique(regulon$tf), function(x) c(table(regulon[regulon$tf==x,]$mor) / sum(table(regulon[regulon$tf==x,]$mor)),tf=x,nooftargets=length(regulon[regulon$tf==x,]$mor)))
+mordis <- as.data.frame(do.call(rbind,mordis))
+mordis$`1` <- as.numeric(mordis$`1`)
+mordis$`-1` <- as.numeric(mordis$`-1`)
+
+#distribution of targets
+hist(mordis$`1`)
+hist(mordis$`-1`)
+
+#define repressor/activator
+mordis$func <- NA
+mordis[mordis$`1`>0.9,]$func <- "activator"
+mordis[mordis$`-1`>0.9,]$func <- "repressor"
+mordis[is.na(mordis$func),]$func <- "ambiguous"
+
+#plot mean transcription factor activity across all cells
+tfmean <- rowMeans(patient1.filt@assays$dorothea@data)
+mordis$meanact <- tfmean[match(mordis$tf,names(tfmean))]
+#mean activity
+tfmean.p <- ggplot(data=mordis,mapping = aes(x=func,y=meanact,fill=func)) +
+  geom_violin() +
+  geom_boxplot(alpha=0.5,outlier.size = 0) + 
+  labs(x=NULL,y="mean activity") +
+  geom_hline(yintercept = 0) +
+  theme_jb()
+ggsave(filename = paste0(OUTPUT,"figs/patient1-all-repact-meanact.svg"),tfmean.p,width = 3,height = 3)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-all-repact-meanact-noleg.svg"),tfmean.p + ggtitle(NULL) + theme(legend.position = "none"),width = 3,height = 3)
+
+#across all clusters
+tfmean.perclus <- lapply(unique(patient1.filt$tumortype), function(cl) rowMeans(patient1.filt@assays$dorothea@data[,names(patient1.filt$tumortype[patient1.filt$tumortype==cl])]))
+names(tfmean.perclus) <- unique(patient1.filt$tumortype)
+
+tfmean.perclus <- t(do.call(rbind,tfmean.perclus))
+
+mordis <- cbind(mordis,tfmean.perclus[match(mordis$tf,rownames(tfmean.perclus)),])
+
+mordis.melt <- reshape2::melt(mordis,id.vars = c("-1","1","tf","func","meanact"))
+
+#check how many clusters show active TFs depending of TF class
+mordis.log <- mordis
+mordis.log[,-(1:6)] <- mordis.log[,-(1:6)]>0
+mordis.log.melt <- reshape2::melt(mordis.log,id.vars = c("-1","1","tf","func","meanact"))
+
+mordis.log$noofpostfact <- apply(mordis.log[,-(1:6)],1,function(x) sum(x) / length(unique(patient1.filt$tumortype)))
+
+clusact.p <- ggplot(data=mordis.log,mapping = aes(x=func,y=noofpostfact,fill=func)) +
+  geom_violin() +
+  labs(x=NULL,y="#clusters with activity>0") +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  geom_hline(yintercept = 0.8) +
+  theme_jb()
+ggsave(filename = paste0(OUTPUT,"figs/patient1-all-repact-clusact.svg"),clusact.p,width = 4,height = 3)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-all-repact-clusact-noleg.svg"),clusact.p + ggtitle(NULL) + theme(legend.position = "none"),width = 4,height = 3)
+
+#which repressors are non active?
+regulon[regulon$tf %in% mordis.log[mordis.log$func=="repressor",][mordis.log[mordis.log$func=="repressor",]$noofpostfact<0.8,]$tf,]
+
+#quantification
+mordis.q <- lapply(unique(mordis.log$func),function(x) sum(mordis.log[mordis.log$func==x,]$noofpostfact>0.8,na.rm = T) / length(mordis.log[mordis.log$func==x,]$noofpostfact>0.8))
+names(mordis.q) <- unique(mordis.log$func)
+```

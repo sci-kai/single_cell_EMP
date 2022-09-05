@@ -1,0 +1,164 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "2th June 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+# Load Seurat Objects with annotations
+
+## B-Cells
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-BCells.RData"))
+doublet_BCells1 <- paste0("BCells-doublets-",SCC.B$CellType_BCells[!SCC.B$CellType_BCells %in% c("B-Cells","Plasmablasts")])
+names(doublet_BCells1) <- names(SCC.B$CellType_BCells[!SCC.B$CellType_BCells %in% c("B-Cells","Plasmablasts")])
+load(paste0(OUTPUT,"RData/SCCfilt-BCellsfilt.RData"))
+doublet_BCells2 <- paste0("BCells-doublets-",SCC.B$CellType_BCells2[!SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+names(doublet_BCells2) <- names(SCC.B$CellType_BCells2[!SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+doublet_BCells <- c(doublet_BCells1,doublet_BCells2)
+
+BCells.zoom0 <- SCC.B$CellType_BCells2[SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")]
+names(BCells.zoom0) <- names(SCC.B$CellType_BCells2[SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+```
+
+## Tumor Cells
+
+```{r}
+#doublets
+load(paste0(OUTPUT,"RData/SCCfilt-epi.RData"))
+doublet_tumor <- paste0("Tumor-doublets-",SCC.epi$CellType_epi[!SCC.epi$CellType_epi=="Tumor"])
+names(doublet_tumor) <- names(SCC.epi$CellType_epi[!SCC.epi$CellType_epi=="Tumor"])
+
+epi.zoom0 <- SCC.epi$CellType_epi[SCC.epi$CellType_epi=="Tumor"]
+names(epi.zoom0) <- names(SCC.epi$CellType_epi)
+```
+
+## Fibroblasts
+
+```{r}
+#doublets
+load(paste0(OUTPUT,"RData/SCCfilt-fibro.RData"))
+doublet_fibro <- paste0("Fibroblasts-doublets-",SCC.fibro$CellType_fibro_SCTccmito_harmony[!SCC.fibro$CellType_fibro_SCTccmito_harmony=="Fibroblasts"])
+names(doublet_fibro) <- names(SCC.fibro$CellType_fibro_SCTccmito_harmony[!SCC.fibro$CellType_fibro_SCTccmito_harmony=="Fibroblasts"])
+
+#zoom levels
+load(paste0(OUTPUT,"RData/SCCfilt-fibrofilt.RData"))
+fibro.zoom0 <- SCC.fibro$Celltype_fibro_zoom0
+names(fibro.zoom0) <- names(SCC.fibro$Celltype_fibro_zoom0)
+```
+
+## myeloid
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-my.RData"))
+
+doublet_my <- paste0("myeloid-doublets-",SCC.my$CellType_my[!SCC.my$CellType_my %in% c("myeloid cells")])
+names(doublet_my) <- names(SCC.my$CellType_my[!SCC.my$CellType_my %in% c("myeloid cells")])
+
+load(paste0(OUTPUT,"RData/SCCfilt-myfilt.RData"))
+my.zoom0 <- SCC.my$Celltype_my_zoom0
+names(my.zoom0) <- names(SCC.my$Celltype_my_zoom0)
+```
+
+## T-Cells
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-TCells.RData"))
+doublet_TCells <- paste0("TCells-doublets-",SCC.T$CellType_TCells[!SCC.T$CellType_TCells=="T-Cells"])
+names(doublet_TCells) <- names(SCC.T$CellType_TCells[!SCC.T$CellType_TCells=="T-Cells"])
+
+TCells.zoom0 <- SCC.T$CellType_TCells[SCC.T$CellType_TCells=="T-Cells"]
+names(TCells.zoom0) <- names(SCC.T$CellType_TCells[SCC.T$CellType_TCells=="T-Cells"])
+```
+
+## merge  all together and annotate
+
+```{r}
+#all together
+doublets <- c(doublet_fibro,doublet_my,doublet_BCells,doublet_TCells,doublet_tumor)
+
+#rename non-doublets
+doublets[doublets=="Fibroblasts-doublets-Muscle cells"] <- "Muscle cells"
+doublets[doublets=="TCells-doublets-Mast cells"] <- "Mast cells"
+doublets[doublets=="BCells-doublets-cycling Immune cells"] <- "cycling Immune cells"
+
+zoom0 <- c(fibro.zoom0,my.zoom0,BCells.zoom0,TCells.zoom0,epi.zoom0,doublets[doublets %in% c("Muscle cells","Mast cells","cycling Immune cells")])
+
+doublets <- doublets[!doublets %in% c("Muscle cells","Mast cells","cycling Immune cells")]
+
+#load SCC file and other celltypes
+load(paste0(OUTPUT,"RData/SCCfilt.RData"))
+
+endo <- as.character(SCC$CellType_SCTccmito_harmony[SCC$CellType_SCTccmito_harmony %in% c("ECs")])
+names(endo) <- names(SCC$CellType_SCTccmito_harmony[SCC$CellType_SCTccmito_harmony %in% c("ECs")])
+
+# Assign new Annotations
+SCC$CellType_SCTccmito_harmony_zoom0 <- "NA"
+SCC$CellType_SCTccmito_harmony_zoom0 <- c(doublets,zoom0,endo)[match(names(SCC$CellType_SCTccmito_harmony_zoom0),names(c(doublets,zoom0,endo)))]
+
+umapharmony.SCTccmito.zoom0 <- DimPlot(SCC,
+                                   reduction = "humap_SCTccmito_sigma0.25",
+                                   pt.size = 1,
+                                   label = T,
+                                   raster = F,
+                                   group.by = "CellType_SCTccmito_harmony_zoom0") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0.svg"),umapharmony.SCTccmito.zoom0)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0-noleg.svg"),umapharmony.SCTccmito.zoom0 + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+umapharmony.SCTccmito.zoom0
+```
+
+```{r}
+#all types separately
+umapharmony.SCTccmito.zoom0.type <- list()
+for (type in unique(SCC$CellType_SCTccmito_harmony_zoom0)) {
+  umapharmony.SCTccmito.zoom0.type[[type]] <- DimPlot(AddMetaData(SCC, SCC$CellType_SCTccmito_harmony_zoom0 == type, col.name = "typetemp"), 
+          reduction = "humap_SCTccmito_sigma0.25", 
+          pt.size = 1, 
+          label = F, 
+          raster = F,
+          order = "TRUE",
+          cols = c("grey95","blue"),
+          group.by = "typetemp") +  
+    ggtitle(type) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0-",gsub("[)]",".",gsub("[(]",".",gsub("[?]",".",gsub("-",".",gsub(" ",".",gsub("/",".",type)))))),"-noleg.png"),umapharmony.SCTccmito.zoom0.type[[type]] + theme(legend.position = "none"), width = 10, height = 10)
+}
+
+umapharmony.SCTccmito.zoom0.type
+```
+
+# remove possible doublets and cycling cells
+
+```{r}
+SCC <- subset(SCC,cells = names(SCC$CellType_SCTccmito_harmony_zoom0[!SCC$CellType_SCTccmito_harmony_zoom0 %in% c("doublets","cycling Immune cells")]))
+
+DefaultAssay(SCC) <- "RNA"
+SCC@assays$SCT <- NULL
+SCC@assays$SCTccmito <- NULL
+for (x in names(SCC@reductions)) {SCC@reductions[[x]] <- NULL}
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfiltnod.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfiltnod-sessionInfo.txt"))
+```

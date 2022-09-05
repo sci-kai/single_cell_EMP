@@ -1,0 +1,115 @@
+---
+title: "Tumor types"
+author: "Kai"
+date: "27th July 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Load
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-tumorfilt.RData"))
+```
+
+
+# Summarize cluster fors overview
+
+```{r}
+patient1.tumor$tumortype_ov <- as.character(patient1.tumor$seurat_clusters_tumorfilt_SCTccmito_PCA)
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="0"] <- "metabolism"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="1"] <- "mix"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="2"] <- "epi"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="3"] <- "hypoxia"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="4"] <- "Immune (CXCL1/2/3/8)"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="5"] <- "hypoxia"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="6"] <- "pEMT"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="7"] <- "pEMT"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="8"] <- "pEMT"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="9"] <- "pEMT"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="10"] <- "epi"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="11"] <- "Immune (CXCL1/2/3/8)"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="12"] <- "epi"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="13"] <- "stress"
+patient1.tumor$tumortype_ov[patient1.tumor$tumortype_ov=="14"] <- "epi"
+patient1.tumor$tumortype_ov <- factor(patient1.tumor$tumortype_ov, levels = c("pEMT","mix","epi","Immune (CXCL1/2/3/8)","hypoxia","metabolism","stress"))
+
+umap.SCTccmito.tumortype_ov <- DimPlot(patient1.tumor,
+                                       reduction="umap_SCTccmito",
+                                       pt.size = 1,
+                                       label = T,
+                                       group.by = "tumortype_ov") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-UMAP-tumortype_ov-noleg.svg"),umap.SCTccmito.tumortype_ov + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+
+umap.SCTccmito.tumortype_ov + theme(legend.position = "none")
+```
+
+# Summarize clusters but keep heterogeneity from EMP clusters
+
+```{r}
+#vimentin expression in cluster 1
+patient1.tumor$tumortype <- as.character(patient1.tumor$seurat_clusters_tumorfilt_SCTccmito_PCA)
+patient1.tumor$tumortype[patient1.tumor$tumortype=="0"] <- "metabolism"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="1"] <- "mix"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="2"] <- "epi-1"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="3"] <- "hypoxia"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="4"] <- "Immune (CXCL1/2/3/8)"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="5"] <- "hypoxia"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="6"] <- "pEMT-1"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="7"] <- "pEMT-2"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="8"] <- "pEMT-3"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="9"] <- "pEMT-4"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="10"] <- "epi-2"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="11"] <- "Immune (CXCL1/2/3/8)"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="12"] <- "epi-3"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="13"] <- "stress"
+patient1.tumor$tumortype[patient1.tumor$tumortype=="14"] <- "epi-4"
+patient1.tumor$tumortype <- factor(patient1.tumor$tumortype, levels = c("pEMT-1","pEMT-2","pEMT-3","pEMT-4","mix","epi-1","epi-2","epi-3","epi-4","Immune (CXCL1/2/3/8)","hypoxia","metabolism","stress"))
+
+#set colors for types
+tumorcol <- colorfunc(levels(patient1.tumor$tumortype_ov))
+newtumorcol <- c(rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[names(tumorcol)=="mix"],
+                 rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#FFFFFF"))(6)[c(2,4)],
+                 unlist(lapply(tumorcol[!names(tumorcol) %in% c("pEMT","epi","mix")],function(x) colorRampPalette(colors = c(x,"#FFFFFF"))(6)[5]))
+                 )
+names(newtumorcol)[1:4] <- paste0("pEMT-",1:4)
+names(newtumorcol)[6:9] <- paste0("epi-",1:4)
+
+umap.SCTccmito.tumortype <- DimPlot(patient1.tumor,
+                                    reduction="umap_SCTccmito",
+                                    pt.size = 1,
+                                    label = T,
+                                    group.by = "tumortype") + 
+  scale_color_manual(values = newtumorcol) +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-UMAP-tumortype.svg"),umap.SCTccmito.tumortype + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-UMAP-tumortype-noleg.svg"),umap.SCTccmito.tumortype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+
+umap.SCTccmito.tumortype + theme(legend.position = "none")
+```
+
+# Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/patient1-tumorfilt-typeanalysis.RData"),patient1.tumor)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient1-tumorfilt-typeanalysis-sessionInfo.txt"))
+```

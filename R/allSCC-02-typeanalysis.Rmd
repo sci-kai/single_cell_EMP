@@ -1,0 +1,762 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "10th May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ComplexHeatmap)
+library(ggrepel)
+library(RColorBrewer)
+library(dplyr)
+library(cowplot)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/alldatasets/"
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+load(paste0(OUTPUT,"RData/alltumor.RData"))
+
+#set expression matrices and annotation objects for all Heatmaps
+bottomanno <- HeatmapAnnotation(df = data.frame(patients=SCC$patients,
+                                                Lok=SCC$Lok),
+                                col = list(patients=colorfunc(levels(SCC$patients)),
+                                           Lok=colorfunc(levels(SCC$Lok))),
+                                which = "column", annotation_name_side = "left")
+```
+
+# Differential expression
+
+```{r}
+SCC.hmarker20 <- calculate_foldchanges(SCC,SCC$seurat_clusters_all_SCTccmito_PCA_harmony_res2)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.hmarker20 <- SCC.hmarker20[(SCC.hmarker20$pct.1 > 0.1 | SCC.hmarker20$pct.2 > 0.1) & abs(SCC.hmarker20$avg_log2FC)>0.25,]
+```
+
+# Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_hmarker20 = function(x) {
+  c(sort(SCC.hmarker20[SCC.hmarker20$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_hmarker20 = function(x) {
+  c(sort(SCC.hmarker20[SCC.hmarker20$cluster==x,]$pct.1 - SCC.hmarker20[SCC.hmarker20$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.hmarker20.volpct <- lapply(levels(SCC.hmarker20$cluster), function(x) ggvolcano(SCC.hmarker20[SCC.hmarker20$cluster==x,],logFCcutoff_hmarker20(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.hmarker20.volpct) <- levels(SCC.hmarker20$cluster)
+
+SCC.hmarker20.volpctdiff <- lapply(levels(SCC.hmarker20$cluster), function(x) ggvolcano(SCC.hmarker20[SCC.hmarker20$cluster==x,],pctdiffcutoff_hmarker20(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.hmarker20.volpctdiff) <- levels(SCC.hmarker20$cluster)
+
+#save volcano plots
+for (i in names(SCC.hmarker20.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-volcanopct-",i,".svg"),SCC.hmarker20.volpct[[i]])
+}
+for (i in names(SCC.hmarker20.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-volcanopctdiff-",i,".svg"),SCC.hmarker20.volpctdiff[[i]])
+}
+
+SCC.hmarker20.volpct
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+library(fgsea)
+
+FCranks.hmarker20 <- list()
+for (cl in unique(SCC.hmarker20$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.hmarker20[[cl]] <- SCC.hmarker20[SCC.hmarker20$cluster==cl,]$avg_log2FC
+  names(FCranks.hmarker20[[cl]]) <- SCC.hmarker20[SCC.hmarker20$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.hmarker20[[cl]][is.infinite(FCranks.hmarker20[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.hmarker20 <- list()
+for (cl in levels(SCC.hmarker20$cluster)) {
+  GS.gsea.hmarker20[[cl]] <- fgsea(pathways=GS,
+                                   stats=FCranks.hmarker20[[cl]],
+                                   minSize=15,
+                                   maxSize=500,
+                                   nperm=10000)
+}
+
+#Plotting
+#remove GO in name and put to lower cases
+GS.gsea.hmarker20.plot <- lapply(GS.gsea.hmarker20,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.hmarker20.plot <- lapply(GS.gsea.hmarker20.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                       gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+GS.gsea.hmarker20vis <- lapply(names(GS.gsea.hmarker20.plot), function(x) try(GSEAvis(GSEAdf = GS.gsea.hmarker20.plot[[x]],
+                                                                                      pvalthres = NULL,
+                                                                                      NESthres = NULL,
+                                                                                      npathways = 5,
+                                                                                      sort = "NES",
+                                                                                      positive = T) +
+                                                                                labs(x=x,y="") +
+                                                                                scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.hmarker20.plot, function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$padj[1:5]}))))),colours = c("white","blue")) +
+                                                                                coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.hmarker20.plot,function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$NES[1:5]}))))) +
+                                                                                scale_y_continuous(breaks = seq(0,10,0.5))
+)) 
+names(GS.gsea.hmarker20vis) <- names(GS.gsea.hmarker20.plot)
+lapply(names(GS.gsea.hmarker20.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-GS-top5byES-",x,".svg"),GS.gsea.hmarker20vis[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+library(cowplot)
+GS.gsea.hmarker20vis.comb <- lapply(1:(length(GS.gsea.hmarker20vis)-1), function(x) {
+  GS.gsea.hmarker20vis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gsea.hmarker20vis.comb[[length(GS.gsea.hmarker20vis.comb)+1]] <- GS.gsea.hmarker20vis[[length(GS.gsea.hmarker20vis)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-GS-top5byES-all.svg"),
+           plot_grid(plotlist = GS.gsea.hmarker20vis.comb,ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-GS-top5byES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.hmarker20vis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+
+GS.gsea.hmarker20vis.comb <- lapply(1:(length(GS.gsea.hmarker20vis)), function(x) {
+  GS.gsea.hmarker20vis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-GS-top5byES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.hmarker20vis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+```
+
+# Top genes
+
+```{r}
+topgenes = 10
+
+#choose those top genes
+SCC.hmarker20.percluster <- lapply(unique(SCC.hmarker20$cluster), function(x) SCC.hmarker20[SCC.hmarker20$cluster==x,])
+names(SCC.hmarker20.percluster) <- unique(SCC.hmarker20$cluster)
+
+top.logFC.hmarker20 <- list()
+highlightgenes.hmarker20 <- list()
+for (cl in names(SCC.hmarker20.percluster)) {
+  #top avg FC
+  top.logFC.hmarker20[[cl]] <- head(SCC.hmarker20.percluster[[cl]][order(SCC.hmarker20.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.hmarker20[[cl]] <- data.frame(genes=top.logFC.hmarker20[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.hmarker20 <- as.data.frame(data.table::rbindlist(highlightgenes.hmarker20))
+
+SCC <- ScaleData(SCC,
+                 features = as.character(highlightgenes.hmarker20$genes),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.hmarker20 <- expr.RNAscaledata[as.character(highlightgenes.hmarker20$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.hmarker20 <- c(-max(abs(expr.RNAscaledata.hl.hmarker20)),
+                                           -(mean(unlist(abs(expr.RNAscaledata.hl.hmarker20))[unlist(abs(expr.RNAscaledata.hl.hmarker20))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.hmarker20))[unlist(abs(expr.RNAscaledata.hl.hmarker20))!=0])),
+                                           0,
+                                           mean(unlist(abs(expr.RNAscaledata.hl.hmarker20))[unlist(abs(expr.RNAscaledata.hl.hmarker20))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.hmarker20))[unlist(abs(expr.RNAscaledata.hl.hmarker20))!=0]),
+                                           max(abs(expr.RNAscaledata.hl.hmarker20)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+diffexprhm.hl.clustered.hmarker20 <- Heatmap(expr.RNAscaledata.hl.hmarker20,
+                                             name="scale.data",
+                                             col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.hmarker20, colors = c("red","purple", "black", "yellow","white")),
+                                             show_column_names = F,
+                                             show_row_names = T,
+                                             cluster_columns = T,
+                                             cluster_column_slices = F,
+                                             clustering_method_columns = "ward.D2",
+                                             clustering_distance_columns = "euclidean",
+                                             column_split = SCC$seurat_clusters_all_SCTccmito_PCA_harmony_res2,
+                                             row_split = factor(highlightgenes.hmarker20$state, levels=levels(SCC$seurat_clusters_all_SCTccmito_PCA_harmony_res2)),
+                                             row_order = rownames(expr.RNAscaledata.hl.hmarker20),
+                                             cluster_rows = F,
+                                             cluster_row_slices = F,
+                                             row_title_rot = 0,
+                                             column_title_rot = 90,
+                                             bottom_annotation = bottomanno,
+                                             #graphic options
+                                             row_names_gp = gpar(fontsize=11),
+                                             column_names_gp = gpar(fontsize=11),
+                                             row_title_gp = gpar(fontsize=11),
+                                             column_title_gp = gpar(fontsize=11),
+                                             heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                             border = T,
+                                             use_raster = T,
+                                             raster_device = "CairoPNG",
+                                             raster_quality = 4,
+                                             heatmap_height = unit(length(unique(SCC.hmarker20$cluster))*1.5,"in"),
+                                             heatmap_width = unit(15,"in"))
+
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-clusharmony20-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=length(unique(SCC.hmarker20$cluster))*3)
+diffexprhm.hl.clustered.hmarker20
+dev.off()
+```
+
+# Differential expression for patients
+
+## define cluster for patients
+
+```{r}
+SCC$patientclus <- as.character(SCC$patients)
+SCC$patientclus[SCC$patientclus %in% names(table(SCC$patientclus)[table(SCC$patientclus)<100])] <- "other"
+SCC$patientclus <- factor(SCC$patientclus,levels = sort(unique(SCC$patientclus)))
+
+umap.SCTccmito.patientclus <- DimPlot(SCC,
+                                      reduction="umap_SCTccmito",
+                                      pt.size = 1,
+                                      label = T,
+                                      group.by = "patientclus") + 
+  theme_jb_nogrid()
+umapharmony.SCTccmito.patientclus <- DimPlot(SCC,
+                                             reduction="humap_SCTccmito",
+                                             pt.size = 1,
+                                             label = T,
+                                             group.by = "patientclus") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-patientclus-noleg.svg"),umap.SCTccmito.patientclus + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-patientclus.svg"),umap.SCTccmito.patientclus, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-patientclus-noleg.svg"),umapharmony.SCTccmito.patientclus + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-patientclus.svg"),umapharmony.SCTccmito.patientclus, width=5, height=5)
+
+umap.SCTccmito.patientclus + theme(legend.position = "none")
+umapharmony.SCTccmito.patientclus + theme(legend.position = "none")
+```
+
+```{r}
+SCC.patientclus <- calculate_foldchanges(SCC,SCC$patientclus)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.patientclus <- SCC.patientclus[(SCC.patientclus$pct.1 > 0.1 | SCC.patientclus$pct.2 > 0.1) & abs(SCC.patientclus$avg_log2FC)>0.25,]
+```
+
+# Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_patientclus = function(x) {
+  c(sort(SCC.patientclus[SCC.patientclus$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_patientclus = function(x) {
+  c(sort(SCC.patientclus[SCC.patientclus$cluster==x,]$pct.1 - SCC.patientclus[SCC.patientclus$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.patientclus.volpct <- lapply(levels(SCC.patientclus$cluster), function(x) ggvolcano(SCC.patientclus[SCC.patientclus$cluster==x,],logFCcutoff_patientclus(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.patientclus.volpct) <- levels(SCC.patientclus$cluster)
+
+SCC.patientclus.volpctdiff <- lapply(levels(SCC.patientclus$cluster), function(x) ggvolcano(SCC.patientclus[SCC.patientclus$cluster==x,],pctdiffcutoff_patientclus(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.patientclus.volpctdiff) <- levels(SCC.patientclus$cluster)
+
+#save volcano plots
+for (i in names(SCC.patientclus.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-volcanopct-",i,".svg"),SCC.patientclus.volpct[[i]])
+}
+for (i in names(SCC.patientclus.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-volcanopctdiff-",i,".svg"),SCC.patientclus.volpctdiff[[i]])
+}
+
+SCC.patientclus.volpct
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+library(fgsea)
+
+FCranks.patientclus <- list()
+for (cl in unique(SCC.patientclus$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.patientclus[[cl]] <- SCC.patientclus[SCC.patientclus$cluster==cl,]$avg_log2FC
+  names(FCranks.patientclus[[cl]]) <- SCC.patientclus[SCC.patientclus$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.patientclus[[cl]][is.infinite(FCranks.patientclus[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.patientclus <- list()
+for (cl in unique(SCC.patientclus$cluster)) {
+  GS.gsea.patientclus[[cl]] <- fgsea(pathways=GS,
+                                     stats=FCranks.patientclus[[cl]],
+                                     minSize=15,
+                                     maxSize=500,
+                                     nperm=10000)
+}
+
+#Plotting
+#remove GO in name and put to lower cases
+GS.gsea.patientclus.plot <- lapply(GS.gsea.patientclus,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.patientclus.plot <- lapply(GS.gsea.patientclus.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                           gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+GS.gsea.patientclusvis <- lapply(names(GS.gsea.patientclus.plot), function(x) try(GSEAvis(GSEAdf = GS.gsea.patientclus.plot[[x]],
+                                                                                          pvalthres = NULL,
+                                                                                          NESthres = NULL,
+                                                                                          npathways = 5,
+                                                                                          sort = "NES",
+                                                                                          positive = T) +
+                                                                                    labs(x=x,y="") +
+                                                                                    scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.patientclus.plot, function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$padj[1:5]}))))),colours = c("white","blue")) +
+                                                                                    coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.patientclus.plot,function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$NES[1:5]}))))) +
+                                                                                    scale_y_continuous(breaks = seq(0,10,0.5))
+)) 
+names(GS.gsea.patientclusvis) <- names(GS.gsea.patientclus.plot)
+lapply(names(GS.gsea.patientclus.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-GS-top5byES-",x,".svg"),GS.gsea.patientclusvis[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+library(cowplot)
+GS.gsea.patientclusvis.comb <- lapply(1:(length(GS.gsea.patientclusvis)-1), function(x) {
+  GS.gsea.patientclusvis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gsea.patientclusvis.comb[[length(GS.gsea.patientclusvis.comb)+1]] <- GS.gsea.patientclusvis[[length(GS.gsea.patientclusvis)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-GS-top5byES-all.svg"),
+           plot_grid(plotlist = GS.gsea.patientclusvis.comb,ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-GS-top5byES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.patientclusvis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+
+GS.gsea.patientclusvis.comb <- lapply(1:(length(GS.gsea.patientclusvis)), function(x) {
+  GS.gsea.patientclusvis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-GS-top5byES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.patientclusvis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=8, 
+           height=12))
+```
+
+# Top genes
+
+```{r}
+topgenes = 5
+
+#choose those top genes
+SCC.patientclus.percluster <- lapply(unique(SCC.patientclus$cluster), function(x) SCC.patientclus[SCC.patientclus$cluster==x,])
+names(SCC.patientclus.percluster) <- unique(SCC.patientclus$cluster)
+
+top.logFC.patientclus <- list()
+highlightgenes.patientclus <- list()
+for (cl in names(SCC.patientclus.percluster)) {
+  #top avg FC
+  top.logFC.patientclus[[cl]] <- head(SCC.patientclus.percluster[[cl]][order(SCC.patientclus.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.patientclus[[cl]] <- data.frame(genes=top.logFC.patientclus[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.patientclus <- as.data.frame(data.table::rbindlist(highlightgenes.patientclus))
+
+SCC <- ScaleData(SCC,
+                 features = as.character(highlightgenes.patientclus$genes),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.patientclus <- expr.RNAscaledata[as.character(highlightgenes.patientclus$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.patientclus <- c(-max(abs(expr.RNAscaledata.hl.patientclus)),
+                                             -(mean(unlist(abs(expr.RNAscaledata.hl.patientclus))[unlist(abs(expr.RNAscaledata.hl.patientclus))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.patientclus))[unlist(abs(expr.RNAscaledata.hl.patientclus))!=0])),
+                                             0,
+                                             mean(unlist(abs(expr.RNAscaledata.hl.patientclus))[unlist(abs(expr.RNAscaledata.hl.patientclus))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.patientclus))[unlist(abs(expr.RNAscaledata.hl.patientclus))!=0]),
+                                             max(abs(expr.RNAscaledata.hl.patientclus)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.patientclus.hm <- Heatmap(expr.RNAscaledata.hl.patientclus,
+                                               name="scale.data",
+                                               col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.patientclus, colors = c("red","purple", "black", "yellow","white")),
+                                               show_column_names = F,
+                                               show_row_names = T,
+                                               cluster_columns = T,
+                                               cluster_column_slices = F,
+                                               clustering_method_columns = "ward.D2",
+                                               clustering_distance_columns = "euclidean",
+                                               column_split = factor(SCC$patientclus),
+                                               row_split = factor(highlightgenes.patientclus$state),
+                                               row_order = rownames(expr.RNAscaledata.hl.patientclus),
+                                               cluster_rows = F,
+                                               cluster_row_slices = F,
+                                               clustering_method_rows =  "ward.D2",
+                                               clustering_distance_rows = "euclidean",
+                                               row_title_rot = 0,
+                                               column_title_rot = 0,
+                                               row_dend_width = unit(0.1,"in"),
+                                               column_dend_height = unit(0.1,"in"),
+                                               #bottom_annotation = bottomanno,column_title_side = "top",column_dend_side = "top",
+                                               #graphic options
+                                               row_names_gp = gpar(fontsize=7),
+                                               column_names_gp = gpar(fontsize=11),
+                                               row_title_gp = gpar(fontsize=11),
+                                               column_title_gp = gpar(fontsize=11),
+                                               heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                               border = T,
+                                               use_raster = T,
+                                               raster_device = "CairoPNG",
+                                               raster_quality = 4,
+                                               height = unit(4,"in"),
+                                               width = unit(4,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-patientclus-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=20)
+expr.RNAscaledata.hl.patientclus.hm
+dev.off()
+```
+
+# Overview about patient in UMAP and clusters
+
+## patient in single UMAPs
+
+```{r}
+#all patient separately
+UMAP.SCTccmito.patientsingle <- list()
+for (pat in unique(SCC$patients)) {
+  SCC <- AddMetaData(SCC, SCC$patients == pat, col.name = paste0("patients.",pat))
+  
+  UMAP.SCTccmito.patientsingle[[pat]] <- DimPlot(SCC, 
+                                                reduction = "umap_SCTccmito", 
+                                                pt.size = 1, 
+                                                label = F, 
+                                                order = "TRUE",
+                                                cols = c("grey95","blue"),
+                                                group.by = paste0("patients.",pat)) +  
+    ggtitle(pat) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-patients-",pat,"-noleg.png"),UMAP.SCTccmito.patientsingle[[pat]] + theme(legend.position = "none"), width = 5, height = 5)
+}
+
+UMAP.SCTccmito.patientsingle
+```
+
+# Annotation
+
+```{r}
+SCC$epitype_ov <- as.character(SCC$seurat_clusters_all_SCTccmito_PCA_harmony_res2)
+SCC$epitype_ov[SCC$epitype_ov=="0"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="1"] <- "hypoxia"
+SCC$epitype_ov[SCC$epitype_ov=="2"] <- "stress"
+SCC$epitype_ov[SCC$epitype_ov=="3"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="4"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="5"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="6"] <- "Immune"
+SCC$epitype_ov[SCC$epitype_ov=="7"] <- "Immune"
+SCC$epitype_ov[SCC$epitype_ov=="8"] <- "metabolism"
+SCC$epitype_ov[SCC$epitype_ov=="9"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="10"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="11"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="12"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="13"] <- "Immune"
+SCC$epitype_ov[SCC$epitype_ov=="14"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="15"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="16"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="17"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="18"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="19"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="20"] <- "pEMT"
+SCC$epitype_ov[SCC$epitype_ov=="21"] <- "epi"
+SCC$epitype_ov[SCC$epitype_ov=="22"] <- "epi"
+
+SCC$epitype_ov <- factor(SCC$epitype_ov, levels = c("pEMT","mix","epi","Immune","hypoxia","metabolism","stress"))
+
+tumorcol <- colorfunc(levels(SCC$epitype_ov))
+
+umap.SCTccmito.epitype_ov <- DimPlot(SCC,
+                                     reduction="umap_SCTccmito",
+                                     pt.size = 1,
+                                     label = F,
+                                     group.by = "epitype_ov") + 
+  scale_color_manual(values = tumorcol) +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+umapharmony.SCTccmito.epitype_ov <- DimPlot(SCC,
+                                            reduction="humap_SCTccmito",
+                                            pt.size = 1,
+                                            label = T,
+                                            group.by = "epitype_ov") + 
+  scale_color_manual(values = tumorcol) +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-epitype_ov-noleg.svg"),umap.SCTccmito.epitype_ov + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-epitype_ov.svg"),umap.SCTccmito.epitype_ov, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-epitype_ov-noleg.svg"),umapharmony.SCTccmito.epitype_ov + theme(legend.position = "none") + ggtitle(""), width=3.5, height=3.5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-epitype_ov.svg"),umapharmony.SCTccmito.epitype_ov, width=5, height=5)
+
+umap.SCTccmito.epitype_ov + theme(legend.position = "none")
+umapharmony.SCTccmito.epitype_ov + theme(legend.position = "none")
+```
+
+```{r}
+#Barplots
+SCC$sampleLok <-  as.character(paste0(as.character(SCC$sample),"-",as.character(SCC$Lok)))
+SCC$sampleLok[grep("NA",SCC$sampleLok)] <- NA
+SCC$sampleLok <- factor(SCC$sampleLok,levels = rev(levels(factor(SCC$sampleLok))))
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-sampleLok-epitype_ov-barplot-rel.svg"),histbarplot(SCC$sampleLok,SCC$epitype_ov,relative = T) + scale_fill_manual(values = tumorcol) + theme(panel.grid.minor.x = element_blank()), width=5, height=4)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-sampleLok-epitype_ov-barplot-abs.svg"),histbarplot(SCC$sampleLok,SCC$epitype_ov,relative = F) + scale_y_continuous(breaks=seq(0,10000,1000))  + scale_fill_manual(values = tumorcol) + theme(panel.grid.minor.x = element_blank()), width=5, height=4)
+
+sampleLok.t <- as.data.frame(table(SCC$sampleLok))
+
+#number of cells per sampleLok
+sampleLok.p <- ggplot(data=sampleLok.t,aes(x=Var1,y=Freq)) +
+  geom_bar(stat="identity",
+           position="stack") +
+  geom_text(mapping = aes(label=Freq),size=2.5) +
+  labs(x="",y="number") +
+  scale_y_continuous(breaks = seq(0,20000,1000)) +
+  coord_flip() +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-sampleLok-table.svg"),sampleLok.p, width=5, height=4)
+
+library(cowplot)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-epitype_ov-overviewplot.svg"),
+       plot_grid(plotlist = list(
+         histbarplot(SCC$sampleLok,SCC$epitype_ov,relative = T) + scale_fill_manual(values = tumorcol) + theme(panel.grid.minor.x = element_blank(),legend.position = "none",axis.text.y = element_text(size=10)),
+         sampleLok.p + theme(axis.text.y = element_blank(),axis.ticks.y = element_blank(),legend.position = "none")),
+         ncol=2,nrow=1,align = "h",labels=NULL,axis = "rlbt",rel_widths = c(4,1)),
+       width=4,height=3.5)
+```
+
+
+# Differential expression
+
+```{r}
+SCC.epitype <- calculate_foldchanges(SCC,SCC$epitype_ov)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.epitype <- SCC.epitype[(SCC.epitype$pct.1 > 0.1 | SCC.epitype$pct.2 > 0.1) & abs(SCC.epitype$avg_log2FC)>0.25,]
+```
+
+# Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_epitype = function(x) {
+  c(sort(SCC.epitype[SCC.epitype$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_epitype = function(x) {
+  c(sort(SCC.epitype[SCC.epitype$cluster==x,]$pct.1 - SCC.epitype[SCC.epitype$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.epitype.volpct <- lapply(levels(SCC.epitype$cluster), function(x) ggvolcano(SCC.epitype[SCC.epitype$cluster==x,],logFCcutoff_epitype(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.epitype.volpct) <- levels(SCC.epitype$cluster)
+
+SCC.epitype.volpctdiff <- lapply(levels(SCC.epitype$cluster), function(x) ggvolcano(SCC.epitype[SCC.epitype$cluster==x,],pctdiffcutoff_epitype(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.epitype.volpctdiff) <- levels(SCC.epitype$cluster)
+
+#save volcano plots
+for (i in names(SCC.epitype.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-volcanopct-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.epitype.volpct[[i]])
+}
+for (i in names(SCC.epitype.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-volcanopctdiff-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.epitype.volpctdiff[[i]])
+}
+
+SCC.epitype.volpct
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+library(fgsea)
+
+FCranks.epitype <- list()
+for (cl in unique(SCC.epitype$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.epitype[[cl]] <- SCC.epitype[SCC.epitype$cluster==cl,]$avg_log2FC
+  names(FCranks.epitype[[cl]]) <- SCC.epitype[SCC.epitype$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.epitype[[cl]][is.infinite(FCranks.epitype[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.epitype <- list()
+for (cl in levels(SCC.epitype$cluster)) {
+  GS.gsea.epitype[[cl]] <- fgsea(pathways=GS,
+                                 stats=FCranks.epitype[[cl]],
+                                 minSize=15,
+                                 maxSize=500,
+                                 nperm=10000)
+}
+
+#Plotting
+#remove GO in name and put to lower cases
+GS.gsea.epitype.plot <- lapply(GS.gsea.epitype,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.epitype.plot <- lapply(GS.gsea.epitype.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                   gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+GS.gsea.epitypevis <- lapply(names(GS.gsea.epitype.plot), function(x) try(GSEAvis(GSEAdf = GS.gsea.epitype.plot[[x]],
+                                                                                  pvalthres = NULL,
+                                                                                  NESthres = NULL,
+                                                                                  npathways = 5,
+                                                                                  sort = "NES",
+                                                                                  positive = T) +
+                                                                            labs(x=x,y="") +
+                                                                            scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.epitype.plot, function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$padj[1:5]}))))),colours = c("white","blue")) +
+                                                                            coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.epitype.plot,function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$NES[1:5]}))))) +
+                                                                            scale_y_continuous(breaks = seq(0,10,0.5))
+)) 
+names(GS.gsea.epitypevis) <- names(GS.gsea.epitype.plot)
+lapply(names(GS.gsea.epitype.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-GS-top5byES-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",x)))),".svg"),GS.gsea.epitypevis[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+library(cowplot)
+GS.gsea.epitypevis.comb <- lapply(1:(length(GS.gsea.epitypevis)-1), function(x) {
+  GS.gsea.epitypevis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gsea.epitypevis.comb[[length(GS.gsea.epitypevis.comb)+1]] <- GS.gsea.epitypevis[[length(GS.gsea.epitypevis)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-GS-top5byES-all.svg"),
+           plot_grid(plotlist = GS.gsea.epitypevis.comb,ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-GS-top5byES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.epitypevis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+
+GS.gsea.epitypevis.comb <- lapply(1:(length(GS.gsea.epitypevis)), function(x) {
+  GS.gsea.epitypevis[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype_ov-GS-top5byES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gsea.epitypevis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+```
+
+### Top genes
+
+```{r}
+topgenes = 10
+
+#choose those top genes
+SCC.epitype.percluster <- lapply(unique(SCC.epitype$cluster), function(x) SCC.epitype[SCC.epitype$cluster==x,])
+names(SCC.epitype.percluster) <- unique(SCC.epitype$cluster)
+
+top.logFC.epitype <- list()
+highlightgenes.epitype <- list()
+for (cl in names(SCC.epitype.percluster)) {
+  #top avg FC
+  top.logFC.epitype[[cl]] <- head(SCC.epitype.percluster[[cl]][order(SCC.epitype.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.epitype[[cl]] <- data.frame(genes=top.logFC.epitype[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.epitype <- as.data.frame(data.table::rbindlist(highlightgenes.epitype))
+
+SCC <- ScaleData(SCC,
+                 features = as.character(highlightgenes.epitype$genes),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.epitype <- expr.RNAscaledata[as.character(highlightgenes.epitype$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.epitype <- c(-max(abs(expr.RNAscaledata.hl.epitype)),
+                                         -(mean(unlist(abs(expr.RNAscaledata.hl.epitype))[unlist(abs(expr.RNAscaledata.hl.epitype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.epitype))[unlist(abs(expr.RNAscaledata.hl.epitype))!=0])),
+                                         0,
+                                         mean(unlist(abs(expr.RNAscaledata.hl.epitype))[unlist(abs(expr.RNAscaledata.hl.epitype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.epitype))[unlist(abs(expr.RNAscaledata.hl.epitype))!=0]),
+                                         max(abs(expr.RNAscaledata.hl.epitype)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.epitype.hm <- Heatmap(expr.RNAscaledata.hl.epitype,
+                                           name="scale.data",
+                                           col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.epitype, colors = c("red","purple", "black", "yellow","white")),
+                                           show_column_names = F,
+                                           show_row_names = T,
+                                           cluster_columns = T,
+                                           cluster_column_slices = F,
+                                           clustering_method_columns = "ward.D2",
+                                           clustering_distance_columns = "euclidean",
+                                           column_split = SCC$epitype_ov,
+                                           row_split = factor(highlightgenes.epitype$state,levels = levels(SCC$epitype_ov)),
+                                           row_order = rownames(expr.RNAscaledata.hl.epitype),
+                                           cluster_rows = F,
+                                           cluster_row_slices = F,
+                                           row_title_rot = 0,
+                                           column_title_rot = 90,
+                                           bottom_annotation = bottomanno,column_title_side = "top",column_dend_side = "top",
+                                           row_dend_width = unit(0.1,"in"),
+                                           column_dend_height = unit(0.1,"in"),
+                                           #graphic options
+                                           row_names_gp = gpar(fontsize=7),
+                                           column_names_gp = gpar(fontsize=11),
+                                           row_title_gp = gpar(fontsize=11),
+                                           column_title_gp = gpar(fontsize=11),
+                                           heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                           border = T,
+                                           use_raster = T,
+                                           raster_device = "CairoPNG",
+                                           raster_quality = 4,
+                                           height = unit(7,"in"),
+                                           width = unit(5,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-epitype-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=20)
+expr.RNAscaledata.hl.epitype.hm
+dev.off()
+```
+
+
+## Save 
+
+```{r}
+#Single seurat object
+save(file = paste0(OUTPUT,"RData/alltumor-typeanalysis.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/alltumor-typeanalysis-sessionInfo.txt"))
+```

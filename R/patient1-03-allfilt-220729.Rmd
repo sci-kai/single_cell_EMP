@@ -1,0 +1,399 @@
+---
+title: "patient1 - allfilt"
+author: "Kai"
+date: "27th July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Load 
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-filt.RData"))
+load(paste0(OUTPUT,"RData/patient1-tumor.RData"))
+```
+
+# Subset for ambiguous cells identified in tumor subset
+
+```{r}
+patient1 <- subset(patient1.filt,cells = names(patient1.filt$orig.ident)[!names(patient1.filt$orig.ident) %in% names(patient1.tumor$CellType_tumor)[patient1.tumor$CellType_tumor!="Tumor"]])
+
+DefaultAssay(patient1) <- "RNA"
+patient1@assays$SCT <- NULL
+patient1@assays$SCTccmito <- NULL
+for (x in names(patient1@reductions)) {patient1@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+DefaultAssay(patient1) <- "RNA"
+#log-normalization for slot "data"
+patient1 <- NormalizeData(patient1, 
+                          normalization.method = "LogNormalize", #default
+                          scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                          assay = "RNA",
+                          margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+patient1 <- FindVariableFeatures(patient1, 
+                                 assay = "RNA",
+                                 selection.method = "vst", #default
+                                 nfeatures = 2000 #default; only 2000 , 3000 for SCTccmito promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+patient1 <- ScaleData(patient1, 
+                      features = rownames(patient1), 
+                      do.scale = T,
+                      do.center = T,
+                      scale.max = 10,
+                      assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+patient1 <- CellCycleScoring(patient1,
+                             s.features = cc.genes.updated.2019$s.genes,
+                             g2m.features = cc.genes.updated.2019$g2m.genes, 
+                             assay="RNA")
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+patient1 <- SCTransform(patient1, 
+                        ncells=ncol(patient1), #default  
+                        assay="RNA", #default
+                        new.assay.name = "SCTccmito", #default; overwrites old SCTccmito
+                        do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                        variable.features.n = 3000, #default set variable features
+                        vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                        do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                        do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                        return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                        seed.use = 1448145)
+```
+
+# Dimensionality reduction
+
+## PCA
+
+```{r}
+patient1 <- RunPCA(patient1, 
+                   npcs = 50,  #number of PCs to use
+                   assay = "SCTccmito",
+                   rev.pca = F, # default, Run cell x gene matrix
+                   weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                   approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                   features = VariableFeatures(patient1,assay = "SCTccmito"), #default
+                   reduction.name = "pca_SCTccmito",
+                   verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- patient1@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(patient1@assays$SCTccmito@scale.data)[VariableFeatures(patient1,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(patient1, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "CellType") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+PCAplot.SCTccmito
+```
+
+## UMAP
+
+```{r UMAP}
+numberofPCs = 20
+patient1 <- RunUMAP(patient1,
+                    dims = 1:numberofPCs,
+                    assay = "SCTccmito",
+                    umap.method = "uwot", # Seurat default
+                    graph=NULL, #default
+                    reduction="pca_SCTccmito",
+                    reduction.name = "umap_SCTccmito"
+)
+```
+
+```{r}
+UMAP.SCTccmito.celltype <- DimPlot(patient1, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 1, 
+                                   label = F, 
+                                   group.by = "CellType") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-SCTccmito-UMAP-celltype-noleg.svg"),UMAP.SCTccmito.celltype + theme(legend.position = "none") + ggtitle(NULL),width = 5,height = 5)
+
+UMAP.SCTccmito.celltype
+```
+
+# Differential Expression
+
+As recommended by Seurat FAQ, we should use the RNA assay and NOT the pearson residuals of the SCTccmito assay (inside of "scale.data" slot) https://github.com/satijalab/seurat/discussions/4032.
+
+*Slot to use*
+It is default and recommended to use the "data" slot of either RNA assay or SCTccmito assay, since the counts are corrected for the sequencing depth. 
+Mostly the log Foldchange is used in downstream analysis. Hence, we do not calculate p-values with the FIndAllMarkers function but use the FoldChange function to calculate those. Important: The log Foldchange depends on the used slot!
+It is also to note, that the pct.1 and pct.2 values change if you use the RNA or SCTccmito assay.
+
+*PCT option*
+The general review also recommends a min.pct of 25%, but since this only excludes genes from testing, I would rather recommend the default of 0.1 to not miss too many information.
+
+
+```{r}
+#Differential expression of every cluster against all other cluster
+patient1.marker <- calculate_foldchanges(patient1,patient1$CellType)
+```
+
+# Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+pctcutoff = function(x) {
+  c(sort(patient1.marker[patient1.marker$cluster==x,]$pct.1 - patient1.marker[patient1.marker$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+patient1.marker.volpctpos <- lapply(levels(patient1.marker$cluster), function(x) ggvolcano(patient1.marker[patient1.marker$cluster==x,],pctcutoff(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(patient1.marker.volpctpos) <- levels(patient1.marker$cluster)
+
+#save volcano plots
+for (i in names(patient1.marker.volpctpos)) {
+  ggsave(filename = paste0(OUTPUT,"figs/patient1-allfilt-diffexpr-SCTccmito-celltype-volcanopct-onlypos-",i,".svg"),patient1.marker.volpctpos[[i]],width = 5, height = 5)
+}
+
+patient1.marker.volpctpos
+```
+
+## Heatmap of top differentially expressed genes
+
+```{r}
+topgenes = 10
+
+#choose those top genes
+patient1.marker.percluster <- lapply(unique(patient1.marker$cluster), function(x) patient1.marker[patient1.marker$cluster==x,])
+names(patient1.marker.percluster) <- unique(patient1.marker$cluster)
+
+top.logFC.celltype <- list()
+highlightgenes.celltype <- list()
+for (cl in names(patient1.marker.percluster)) {
+  #top avg FC
+  top.logFC.celltype[[cl]] <- head(patient1.marker.percluster[[cl]][order(patient1.marker.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.celltype[[cl]] <- data.frame(genes=top.logFC.celltype[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.celltype <- as.data.frame(data.table::rbindlist(highlightgenes.celltype))
+
+patient1 <- ScaleData(patient1,
+                      features = as.character(highlightgenes.celltype$genes),
+                      do.scale = T,
+                      do.center = T,
+                      scale.max = 10,
+                      assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(patient1, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.celltype <- expr.RNAscaledata[as.character(highlightgenes.celltype$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.celltype <- c(-max(abs(expr.RNAscaledata.hl.celltype)),
+                                          -(mean(unlist(abs(expr.RNAscaledata.hl.celltype))[unlist(abs(expr.RNAscaledata.hl.celltype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.celltype))[unlist(abs(expr.RNAscaledata.hl.celltype))!=0])),
+                                          0,
+                                          mean(unlist(abs(expr.RNAscaledata.hl.celltype))[unlist(abs(expr.RNAscaledata.hl.celltype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.celltype))[unlist(abs(expr.RNAscaledata.hl.celltype))!=0]),
+                                          max(abs(expr.RNAscaledata.hl.celltype)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.celltype.hm <- Heatmap(expr.RNAscaledata.hl.celltype,
+                                            name="scale.data",
+                                            col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.celltype, colors = c("red","purple", "black", "yellow","white")),
+                                            show_column_names = F,
+                                            show_row_names = T,
+                                            cluster_columns = T,
+                                            cluster_column_slices = F,
+                                            clustering_method_columns = "ward.D2",
+                                            clustering_distance_columns = "euclidean",
+                                            column_split = patient1$CellType,
+                                            row_split = factor(highlightgenes.celltype$state, levels = levels(patient1$CellType)),
+                                            cluster_rows = F, 
+                                            row_order = rownames(expr.RNAscaledata.hl.celltype),
+                                            row_title_rot = 0,
+                                            column_title_rot = 90,
+                                            #graphic options
+                                            column_dend_height = unit(0.1,"in"),
+                                            row_names_gp = gpar(fontsize=7),
+                                            column_names_gp = gpar(fontsize=11),
+                                            row_title_gp = gpar(fontsize=11),
+                                            column_title_gp = gpar(fontsize=11),
+                                            heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                            border = T,
+                                            use_raster = T,
+                                            raster_device = "CairoPNG",
+                                            raster_quality = 4,
+                                            height = unit(5,"in"),
+                                            width = unit(10,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/patient1-allfilt-diffexpr-SCTccmito-celltype-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=20)
+expr.RNAscaledata.hl.celltype.hm
+dev.off()
+```
+
+# inferred CNVs
+
+```{r}
+OUTPUTINFERCNV <- paste0(OUTPUT,"inferCNV/")
+
+cell.names <-  colnames(D19200.filt)
+counts_matrix <- GetAssayData(D19200.filt, assay = "RNA", slot = "counts")
+
+annotation_df <- D19200.filt@meta.data[cell.names, "CellType", drop = F]
+write.table(annotation_df, paste0(OUTPUTINFERCNV,"/D19200-filt_annotation.txt"), sep = "\t", col.names = F, row.names = T, quote = F)
+rm(D19200.filt)
+
+infer_cnvs_obj <- CreateInfercnvObject(raw_counts_matrix = as.matrix(counts_matrix),
+                                       annotations_file = paste0(OUTPUTINFERCNV,"/D19200-filt_annotation.txt"),
+                                       delim = "\t",
+                                       gene_order_file = "~/tscr/Peiffer/2 Projects/10x/hg19_genes_noDuplicates.bed",
+                                       ref_group_names = c("Fibroblasts","Endothelial Cells","Monocytes","Dendritic Cells"))
+
+infer_cnvs <- infercnv::run(infer_cnvs_obj,
+                            cutoff = 0.1,
+                            out_dir = paste0(OUTPUTINFERCNV,"/infercnv"),
+                            cluster_by_groups = T,
+                            denoise = T,
+                            HMM = F,
+                            analysis_mode='samples')
+```
+
+## Extract inferCNV data
+
+```{r}
+#load infercnv results
+infer_cnvs <- readRDS(paste0(OUTPUTINFERCNV,"infercnv/run.final.infercnv_obj"))
+#all cells
+infercnv.data <- t(infer_cnvs@expr.data)
+# Only use autosomes
+infercnv.data.auto <- infercnv.data[,rownames(infer_cnvs@gene_order)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")]]
+```
+
+## Heatmap split by CellTypes
+
+```{r}
+#Heatmap with all cells
+infercnv.all.hm <- Heatmap(infercnv.data.auto,
+                           name="log2",
+                           col = circlize::colorRamp2(breaks = c(min(infercnv.data.auto),0.85,1,1.15,max(infercnv.data.auto)),
+                                                      colors = c("darkblue","blue","white","red","darkred")),
+                           show_column_names = F,
+                           show_row_names = F,
+                           #column clustering and split
+                           column_split = factor(paste0("chr",as.character(infer_cnvs@gene_order$chr)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")]), levels=paste0("chr",c(as.character(1:22),"X","Y"))),
+                           column_order = rownames(infer_cnvs@gene_order)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")],
+                           column_title_rot = 90,
+                           column_title_side = "bottom",
+                           cluster_columns = F,
+                           cluster_column_slices = F,
+                           #row clustering and split
+                           row_split = patient1$CellType,
+                           row_title_rot = 0,
+                           cluster_rows = T,
+                           cluster_row_slices = F,
+                           clustering_method_rows =  "ward.D2",
+                           clustering_distance_rows = "euclidean",
+                           #graphic options
+                           row_names_gp = gpar(fontsize=11),
+                           column_names_gp = gpar(fontsize=11),
+                           row_title_gp = gpar(fontsize=11),
+                           heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                           #row_dend_width = unit("1","in"),
+                           border = T,
+                           border_gp = gpar(lwd=0.5),
+                           use_raster = T,
+                           raster_device = "CairoPNG",
+                           raster_quality = 4,
+                           width = unit(7,"in"),
+                           height = unit(5,"in"))
+
+pdf(paste0(OUTPUT,"figs/patient1-allfilt-inferCNVauto_all_hm.pdf"), width=20, height=20)
+infercnv.all.hm
+dev.off()
+```
+
+# Quantified measure of CNV amount to identify tumor cells
+
+## Standard deviation from reference
+
+```{r}
+library(ggpubr)
+# first, get the mean expression value of the reference cells
+refmeans <- apply(infercnv.data.auto[names(patient1$CellType[patient1$CellType!="Tumor"]),],1,mean)
+refmean <- mean(refmeans)
+
+#calculate a standard deviation of each cells against the mean of the reference cells to define CNV strength by smoothed mean expression differences
+refsdpercell <- lapply(unique(patient1$CellType),function(x) apply(infercnv.data.auto,1,function(x) sum((x-refmean)^2) / length(x))[names(patient1$CellType[patient1$CellType==x])])
+names(refsdpercell) <- unique(patient1$CellType)
+
+#remove one NA value
+refsdpercell <- lapply(refsdpercell,function(x) x[!is.na(x)])
+refsdpercell.df <- do.call(rbind,lapply(names(refsdpercell),function(x) data.frame(score=refsdpercell[[x]],CellType=x)))
+refsdpercell.df$CellType[refsdpercell.df$CellType!="Tumor"] <- "non-Tumor"
+
+#ViolinPlot Tumor vs all others
+refsdpercell.vln <- ggplot(data=refsdpercell.df, mapping = aes(x=CellType,y=score)) +
+  geom_violin(fill="blue",col="black") +
+  geom_jitter(size=0.25) +
+  #stat_compare_means(method = "t.test",paired = F) +
+  labs(x="",y="standard deviation from reference") +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/1-inferCNV-refsdviolin.svg"),refsdpercell.vln,device = "svg", width=3, height=5)
+
+refsdpercell.vln
+```

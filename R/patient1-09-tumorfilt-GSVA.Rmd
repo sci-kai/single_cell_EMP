@@ -1,0 +1,401 @@
+---
+title: "patient1 - analysis"
+author: "Kai"
+date: "28th July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ComplexHeatmap)
+library(ggrepel)
+library(GSVA)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Load Seurat Object
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-tumorfilt-typeanalysis.RData"))
+```
+
+# Specific differential expression
+
+```{r}
+Idents(patient1.tumor) <- patient1.tumor$tumortype_ov
+
+epivspEMT <- FoldChange(patient1.tumor,
+                        features = NULL, 
+                        pseudocount.use = 1,
+                        ident.1 = "epi",
+                        ident.2= "pEMT",
+                        assay = "RNA",
+                        slot="data")  
+epivspEMT$gene <- rownames(epivspEMT)
+epivspEMT$cluster <- "epivspEMT"
+
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+epivspEMT <- epivspEMT[(epivspEMT$pct.1 > 0.1 | epivspEMT$pct.2 > 0.1) & abs(epivspEMT$avg_log2FC)>0.25,]
+```
+
+## Volcano Plots 
+
+```{r}
+ggvolcanopctspecific <- function(data,logFCthres_col,logFCthres_text) {
+  logFCthres_col_low <- logFCthres_col[1]
+  logFCthres_col_up <- logFCthres_col[2]
+  logFCthres_text_low <- logFCthres_text[1]
+  logFCthres_text_up <- logFCthres_text[2]
+  ggplot(data = data,
+         aes(x=avg_log2FC,
+             y=pct.1-pct.2,
+             col=avg_log2FC>logFCthres_col_up | avg_log2FC<logFCthres_col_low)) + 
+    geom_point() + 
+    geom_text_repel(aes(label=ifelse(avg_log2FC>logFCthres_text_up | avg_log2FC<logFCthres_text_low,as.character(gene),"")),
+                    max.overlaps = 100) +
+    scale_color_manual(values = c("TRUE"="red", "FALSE"="grey")) +
+    scale_x_continuous(breaks=seq(-signif(max(abs(data$avg_log2FC))+1,digits = 1),
+                                  signif(max(abs(data$avg_log2FC))+1,digits = 1),
+                                  signif((max(abs(data$avg_log2FC))+1)/20,digits=1))) +
+    scale_y_continuous(breaks=seq(-1,1,0.1)) +
+    coord_cartesian(ylim = c(-1,1), xlim=c(-max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))-0.1,max(abs(c(min(data$avg_log2FC),max(data$avg_log2FC))))+0.1)) + #symmetric x-axis and y-axis with short buffer
+    geom_hline(yintercept = 0, col="black", size=0.1) +
+    geom_vline(xintercept = 0, col="black", size=0.1) +
+    theme_jb() +
+    theme(legend.position = "none", panel.grid.minor = element_blank())
+}
+
+epivspEMT.volpct <- ggvolcanopctspecific(epivspEMT,c(-1,1),c(sort(epivspEMT$avg_log2FC, decreasing = F)[11],
+                                                             sort(epivspEMT$avg_log2FC, decreasing = T)[11]))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-epivspEMT-SCTccmito_PCA-volcanopct.svg"),epivspEMT.volpct + scale_x_continuous(breaks = seq(-20,20,0.5)), width = 5,height=5)
+
+epivspEMT.volpct
+```
+
+# define gene signatures
+
+```{r}
+# decide upon average logFC of gene expression
+#histogram
+epivspEMT.log2FCplot <- ggplot() +
+  geom_histogram(mapping = aes(x=epivspEMT$avg_log2FC, 
+                               fill=epivspEMT$avg_log2FC>1 | epivspEMT$avg_log2FC<(-1)),
+                 bins=100) +
+  scale_x_continuous(breaks = seq(-10,10,0.5)) +
+  scale_y_continuous(breaks = seq(0,600,150)) +
+  scale_fill_manual(values = c("TRUE"="red", "FALSE"="black")) +
+  coord_cartesian(xlim=c(-max(abs(c(min(epivspEMT$avg_log2FC),max(epivspEMT$avg_log2FC))))-0.1,max(abs(c(min(epivspEMT$avg_log2FC),max(epivspEMT$avg_log2FC))))+0.1)) +
+  theme_jb() + 
+  theme(legend.position = "none",panel.grid.minor = element_blank())
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-epivspEMT-SCTccmito_PCA-log2FChist.svg"),epivspEMT.log2FCplot, width = 5,height=1.5)
+
+#epithelial signature
+epi.sig <- rownames(epivspEMT[epivspEMT$avg_log2FC>1,])
+#p-EMT signature
+pEMT.sig <- rownames(epivspEMT[epivspEMT$avg_log2FC<(-1),])
+```
+
+# Expression of own signatures
+
+```{r}
+tumorcol <- colorfunc(levels(patient1.tumor$tumortype_ov))
+newtumorcol <- c(rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[names(tumorcol)=="mix"],
+                 rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[!names(tumorcol) %in% c("epi","pEMT","mix")]
+                 )
+names(newtumorcol)[1:4] <- paste0("pEMT-",1:4)
+names(newtumorcol)[6:9] <- paste0("epi-",1:4)
+names(newtumorcol)[names(newtumorcol)=="Immune (CXCL1/2/3/8)"] <- "CXCL1/2/3/8"
+
+# add our own signature
+ownsigs <- list()
+ownsigs$OSCC_epithelial <- epi.sig
+ownsigs$OSCC_EMT <- pEMT.sig
+
+patient1.tumor <- AddModuleScore(patient1.tumor,
+                                 list(epi.sig),
+                                 name = "OSCC_epithelial",
+                                 assay = "RNA",
+                                 seed=1)
+patient1.tumor <- AddModuleScore(patient1.tumor,
+                                 list(pEMT.sig),
+                                 name = "OSCC_EMT",
+                                 assay = "RNA",
+                                 seed=1)
+
+ownsigs.vln <- VlnPlot(patient1.tumor,
+                       features = c("OSCC_epithelial1","OSCC_EMT1"),
+                       group.by = "tumortype_ov",
+                       assay = "SCTccmito",
+                       slot = "data",
+                       pt.size = 0.1,
+                       combine = F)
+names(ownsigs.vln) <- c("epi","EMT")
+ownsigs.vln <- lapply(names(ownsigs.vln),function(x) ownsigs.vln[[x]] + labs(x=NULL,y=x) + theme_jb_nogrid())
+names(ownsigs.vln) <- c("epi","EMT")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-VlnPlot-episig.svg"),ownsigs.vln$epi, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-VlnPlot-episig-noleg.svg"),ownsigs.vln$epi + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-VlnPlot-pEMTsig.svg"),ownsigs.vln$EMT, width=3, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-SCTccmito-VlnPlot-pEMTsig-noleg.svg"),ownsigs.vln$EMT + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+
+ownsigs.vln
+```
+
+# Analysis of EMTome signatures
+
+## Load signatures
+
+```{r}
+library(fgsea)
+#read in MsigDB pathway from downloads, in this case GO: BP
+EMTome <- gmtPathways("~/tscr/kai/projects/01_SCC_scRNA/db/EMTome/EMTome_signatures.gmt")
+#remove spaces
+EMTome <- lapply(EMTome,function(x) gsub(" ","",x))
+#rename Rokavic et al since it is there two times
+names(EMTome)[which(names(EMTome)=="Rokavec_et_al.2017")[2]] <- "Rokavec_et_al.2017_2"
+#rename remsik
+names(EMTome)[grep("Rem",names(EMTome))] <- "Remsik_et_al.2018"
+
+#Add signatures to EMTome database
+## Puram et al signatures
+pEMT.genes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/Purametal/PARTIAL_EMT.txt")
+pEMT.genes <- pEMT.genes$V1
+EMTome$Puram_et_al_partialEMT <- pEMT.genes
+epi1.genes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/Purametal/EPITHELIAL_DIFFERENTIATION_1.txt")
+epi1.genes <- epi1.genes$V1
+EMTome$Puram_et_al_epithelial1 <- epi1.genes
+epi2.genes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/Purametal/EPITHELIAL_DIFFERENTIATION_2.txt")
+epi2.genes <- epi2.genes$V1
+EMTome$Puram_et_al_epithelial2 <- epi2.genes
+
+# Kinker  et al. signatures
+SuppTable4_tenRHPs <- read.csv("~/tscr/kai/projects/01_SCC_scRNA/db/kinker_tirosh_scRNAseqcelllinepaper/SuppTable4_tenRHPs.csv")
+kinker_et_al <- lapply(1:ncol(SuppTable4_tenRHPs), function(x) as.character(SuppTable4_tenRHPs[,x])[as.character(SuppTable4_tenRHPs[,x])!=""])
+names(kinker_et_al) <- paste0("Kinker_et_al_", names(SuppTable4_tenRHPs))
+
+EMTome$Kinker_et_al_EMT.I <- kinker_et_al$Kinker_et_al_EMT.I
+EMTome$Kinker_et_al_EMT.II <- kinker_et_al$Kinker_et_al_EMT.II
+EMTome$Kinker_et_al_EMT.III <- kinker_et_al$Kinker_et_al_EMT.III
+EMTome$Kinker_et_al_Epithelial.Senescence <- kinker_et_al$Kinker_et_al_Epithelial.Senescence
+```
+
+## Quality Control of signatures
+
+```{r}
+expr.RNAdata <- as.data.frame(GetAssayData(patient1.tumor, assay = "RNA", slot = "data"))
+
+allsigs <- c(EMTome,ownsigs) #all signatures
+
+allsigs.allgenes <- unique(unlist(allsigs)) # all genes in signatures
+tumor.allgenes <- rownames(expr.RNAdata) #all genes in scRNAseq
+tumor.exprgenes <- rownames(expr.RNAdata[rowSums(expr.RNAdata)!=0,]) # all expressed genes in scRNAseq
+
+#genes in gene expression matrix (GEM)
+genesinGEM.perc <- unlist(lapply(allsigs, function(x) sum(x %in% tumor.allgenes) / length(x %in% tumor.allgenes))) 
+genesinGEM.abs <- unlist(lapply(allsigs, function(x) sum(x %in% tumor.allgenes)))
+genesinGEM.names <- unlist(lapply(allsigs, function(x) toString(x[x %in% tumor.allgenes])))
+
+#genes not expressed
+genesnotexpr.perc <- unlist(lapply(allsigs, function(x) sum(x %in% tumor.exprgenes) / length(x %in% tumor.exprgenes)))
+genesnotexpr.abs <- unlist(lapply(allsigs, function(x) sum(x %in% tumor.exprgenes)))
+genesnotexpr.names <- unlist(lapply(allsigs, function(x) toString(x[x %in% tumor.exprgenes])))
+
+allsigs.anno <- data.frame(signature=names(genesnotexpr.perc),
+                           inGEM_perc_rank=rank(-genesinGEM.perc, ties.method = "first"),
+                           inGEM_perc=genesinGEM.perc,
+                           inGEM_abs_rank=rank(-genesinGEM.abs, ties.method = "first"),
+                           inGEM_abs=genesinGEM.abs,
+                           inGEM_abs_log10=log10(genesinGEM.abs),
+                           inGEM_genes=genesinGEM.names,
+                           EXPR_perc_rank=rank(-genesnotexpr.perc, ties.method = "first"),
+                           EXPR_perc=genesnotexpr.perc,
+                           EXPR_abs_rank=rank(-genesnotexpr.abs, ties.method = "first"),
+                           EXPR_abs=genesnotexpr.abs,
+                           EXPR_abs_log10=log10(genesnotexpr.abs),
+                           EXPR_genes=genesnotexpr.names,
+                           size=unlist(lapply(allsigs, length)),
+                           size_log10=log10(unlist(lapply(allsigs, length))),
+                           size_rank=rank(-unlist(lapply(allsigs, length)),ties.method = "first")
+)
+rownames(allsigs.anno) <- names(allsigs)
+
+#Visualize size
+library(ggrepel)
+ggplot(data = allsigs.anno,
+       mapping = aes(x=size_rank,y=size)) +
+  geom_point() +
+  theme_bw()
+
+#Visualize no of genes in GEM
+ggplot(data = allsigs.anno,
+       mapping = aes(x=inGEM_abs_rank,y=inGEM_abs)) +
+  geom_point() +
+  theme_jb()
+
+#Visualize percentage of genes in GEM
+ggplot(data = allsigs.anno,
+       mapping = aes(x=inGEM_perc_rank,y=inGEM_perc)) +
+  geom_point() +
+  geom_text_repel(aes(label=ifelse(inGEM_perc<0.9,as.character(signature),""))) + 
+  coord_cartesian(ylim = c(0,1)) +
+  scale_y_continuous(breaks=seq(0,1,0.05)) +
+  theme_jb()
+
+#Visualizae percentage of expressed genes
+ggplot(data = allsigs.anno,
+       mapping = aes(x=EXPR_perc_rank,y=EXPR_perc)) +
+  geom_point() +
+  geom_text_repel(aes(label=ifelse(EXPR_perc<0.8,as.character(signature),""))) + 
+  coord_cartesian(ylim = c(0,1)) +
+  scale_y_continuous(breaks=seq(0,1,0.05)) +
+  theme_jb()
+```
+
+## Overlap of signatures and GSVA
+
+```{r}
+library(GSVA)
+library(RColorBrewer)
+#extended EMTome by own signatures
+EMTome.ext <- c(EMTome,epi=list(ownsigs$OSCC_epithelial),EMT=list(ownsigs$OSCC_EMT))
+
+#Calculate % of overlap between all signatures
+signatureoverlap <- lapply(EMTome.ext,function(y) data.frame(t(unlist(lapply(EMTome.ext,function(x) length(intersect(y,x)) / length(y))))))
+signatureoverlap <- as.data.frame(data.table::rbindlist(signatureoverlap))
+rownames(signatureoverlap) <- names(signatureoverlap)
+
+#GSVA
+EMT.gsva <- gsva(expr= as.matrix(expr.RNAdata), 
+                 gset.idx.list = c(EMTome,ownsigs),
+                 method="gsva", #default
+                 kcdf="Gaussian", #default
+                 abs.ranking=F, #default
+                 min.sz=1, #default
+                 max.sz=Inf, #default
+                 mx.diff=T #default
+)
+
+# Spearman correlation 
+EMT.gsva.cor <- cor(t(EMT.gsva),method = "spearman")
+
+#only with EMTome
+EMT.gsva.emtome <- EMT.gsva[!rownames(EMT.gsva) %in% c("OSCC_epithelial","OSCC_EMT"),]
+EMT.gsva.cor.emtome <- EMT.gsva.cor[!rownames(EMT.gsva.cor) %in% c("OSCC_epithelial","OSCC_EMT"),!colnames(EMT.gsva.cor) %in% c("OSCC_epithelial","OSCC_EMT")]
+```
+
+### Heatmaps
+
+```{r}
+allsigs.anno.EMTome <- allsigs.anno[rownames(EMT.gsva.emtome),]
+rightanno.pub <- HeatmapAnnotation(df=allsigs.anno.EMTome[,c("EXPR_perc","size_log10")],size=anno_text(allsigs.anno.EMTome$size,gp = gpar(fontsize=6)),
+                                   col = list(EXPR_perc=circlize::colorRamp2(breaks=c(0,1),colors = c("white","purple")),
+                                              size_log10=circlize::colorRamp2(breaks=c(0,max(allsigs.anno.EMTome$size_log10)),colors = c("white","darkgreen"))),
+                                   which="row", annotation_name_side = "bottom",annotation_name_gp = gpar(fontsize=11))
+
+
+rownames(EMT.gsva.cor)[rownames(EMT.gsva.cor) %in% c("OSCC_epithelial","OSCC_EMT")] <- c("epi","pEMT")
+colnames(EMT.gsva.cor)[colnames(EMT.gsva.cor) %in% c("OSCC_epithelial","OSCC_EMT")] <- c("epi","pEMT")
+
+#Correlation and Overlap Heatmap with row/column names
+p1 <- Heatmap(EMT.gsva.cor[!rownames(EMT.gsva.cor) %in% c("epi","pEMT"),!colnames(EMT.gsva.cor) %in% c("epi","pEMT")],
+                name="correlation1",
+                column_title = "EMTome signatures",
+                column_title_side = "bottom",
+                col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("darkgreen","white","purple")),
+                show_column_names = T,
+                show_row_names = F,
+                cluster_columns = T,
+                clustering_method_columns = "ward.D2",
+                clustering_distance_columns = "spearman",
+                cluster_rows = T,
+                clustering_method_rows =  "ward.D2",
+                clustering_distance_rows = "spearman",
+                #graphic options
+                row_names_gp = gpar(fontsize=6),
+                column_names_gp = gpar(fontsize=6),
+                row_title_gp = gpar(fontsize=11),
+                heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                border = T,
+                use_raster = T,
+                raster_device = "CairoPNG",
+                raster_quality = 4,
+                width = unit(7,"in"),
+                height = unit(7,"in")
+)
+
+#Correlation plot for own signatures
+p2 <- Heatmap(t(EMT.gsva.cor[c("epi","pEMT"),!colnames(EMT.gsva.cor) %in% c("epi","pEMT")]),
+              name="correlation",
+              col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("darkgreen","white","purple")),
+              show_column_names = T,
+              show_row_names = T,
+              cluster_columns = F,
+              cluster_rows = F,
+              row_order = row_order(p1),
+              #graphic options
+              column_title_rot = 90,
+              row_names_gp = gpar(fontsize=6),
+              column_names_gp = gpar(fontsize=11),
+              row_title_gp = gpar(fontsize=11),
+              heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+              border = T,
+              use_raster = T,
+              raster_device = "CairoPNG",
+              raster_quality = 4,
+              width = unit(0.5,"in"),
+              height = unit(7,"in")
+)
+
+rownames(signatureoverlap)[rownames(signatureoverlap) %in% c("epi","EMT")] <- c("overlap-epi","overlap-pEMT")
+colnames(signatureoverlap)[colnames(signatureoverlap) %in% c("epi","EMT")] <- c("overlap-epi","overlap-pEMT")
+
+#overlap between own signatures and EMTome
+p3 <- Heatmap(t(signatureoverlap[c("overlap-epi","overlap-pEMT"),!colnames(signatureoverlap) %in% c("overlap-epi","overlap-pEMT")]),
+              name="%ov",
+              col=circlize::colorRamp2(breaks=c(0,0.5,1), colors = c("white", "red","darkred")),
+              show_column_names = T,
+              show_row_names = T,
+              cluster_columns = F,
+              cluster_rows = F,
+              right_annotation = rightanno.pub,
+              #graphic options
+              column_title_rot = 90,
+              row_names_gp = gpar(fontsize=6),
+              column_names_gp = gpar(fontsize=11),
+              row_title_gp = gpar(fontsize=11),
+              heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+              border = T,
+              use_raster = T,
+              raster_device = "CairoPNG",
+              raster_quality = 4,
+              width = unit(0.5,"in"),
+              height = unit(7,"in")
+)
+
+#all combined
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-RNAdata-EMTgsva.pdf"), width=20, height=20)
+p1 + p2 + p3
+dev.off()
+```
+
+# Save
+
+```{r}
+#save image
+save(file = paste0(OUTPUT,"RData/patient1-tumorfilt-GSVA.RData"),patient1.tumor,EMT.gsva)
+#save SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient1-tumorfilt-GSVA-sessionInfo.txt"))
+```

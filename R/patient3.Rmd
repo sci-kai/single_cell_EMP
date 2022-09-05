@@ -1,0 +1,573 @@
+---
+title: "patient3"
+author: "Kai"
+date: "6th April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(Seurat)
+library(ggplot2)
+
+#load functions
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+#set output
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient3/"
+```
+
+# Load files
+
+```{r}
+data_dir = "~/tscr/Allgemeine Daten/10x Genomics/data/PEI02_A006200048_MMmono/2019_Nov_scRNAmelanoma/PEI02_noAda12_A006200048_UMAP/cellranger_hg38-3.0.0/SID109560/outs/"
+
+#raw data containing gene expression and Hashtag matrices
+patient3.data <- Read10X(paste0(data_dir,"raw_feature_bc_matrix/"))
+#Setup Seurat object for gene Expression
+patient3 <- CreateSeuratObject(patient3.data, project = "patient3")
+#remove raw data input
+rm(patient3.data)
+```
+
+# Quality control and Filtering
+
+## Assign the expression of mitochondrial and housekeeping genes
+
+houskeeping genes are e.g. ribosomal proteins, expressed in nearly every cell and less sensitive to high dropout.
+
+```{r}
+# relative expression of mitochondrial gene as metric for damaged cells
+patient3[["percent.mito"]] <- PercentageFeatureSet(patient3, pattern = "^MT-") 
+
+#read in names of housekeeper genes
+hkgenes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1) 
+# remove hkgenes that were not found (maybe not in the reference or got lost)
+hkgenes.found <- which(toupper(rownames(patient3)) %in% toupper(hkgenes))
+# sum of hk genes for each cell
+hk_per_cell <- Matrix::colSums(GetAssayData(patient3)[hkgenes.found, ] > 0)
+patient3 <- AddMetaData(object = patient3, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+rm(hk_per_cell,hkgenes.found)
+```
+
+## Quality Control Plots
+
+Than we have four metrices to identify barcodes containing live and usable cells:
+* UMI counts (nCount)
+* Gene counts (nFeature)
+* Mitochondrial gene expression: % of UMIs in mitochondrial genes relative to all genes
+* Housekeeper genes: Number of housekeeping genes (97 in total) that have at least 1 UMI count in a cell (no percentage)
+
+It is not helpful to look at all metrics independently since they correlating a lot with each other. So first, the correlations between the metrices are investigated.
+
+### Filter quality metric dataframe for definitely empty barcodes to get readable histograms
+
+First, we create a helping dataframe and filter out cells that are definitely empty barcodes since they have only very few UMI Counts. 
+These are normally around 70-90% of all barcodes. Removing those will give us more informative histograms (Otherwise there will always be a very high peak at around zero). 
+To examine distribution over all barcodes, we do a cumulative plot showing the % of cells with less than a certain amount of counts.
+
+```{r cumplot}
+#create summary data frame
+barcode_metrics <- data.frame(barcodes = names(patient3$nCount_RNA),
+                              nCount = patient3$nCount_RNA,
+                              nFeature = patient3$nFeature_RNA,
+                              percent.mito = patient3$percent.mito,
+                              n.exp.hkgenes = patient3$n.exp.hkgenes)
+
+cumplotdata <- data.frame(x=1:1000, y= unlist(lapply(1:1000,function(x) sum(patient3$nCount_RNA < x) / length(patient3$nCount_RNA < x))))
+
+cumplot.log10 <- ggplot() + 
+  geom_point(data=cumplotdata,
+             aes(x=log10(x),y=y)) +
+  ggtitle("% of barcodes that are lower than x Counts") +
+  scale_y_continuous(breaks=seq(0,1,0.1)) +
+  coord_cartesian(ylim=c(0.5,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-cumplot-log10.svg"),cumplot.log10)
+
+cumplot.log10
+```
+
+Than we do the actual filtering for around 90% of the cells
+```{r}
+nCount_lowest <- 5
+barcode_metrics <- barcode_metrics[barcode_metrics$nCount > nCount_lowest,]
+```
+
+### Examine: UMI counts vs gene counts
+
+UMI and gene counts are highly correlated with each other. It is not possible to have more genes than counts (since every gene need at least one UMI count).
+
+```{r UMIvsGENE}
+UMIvsGENE.mito <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$percent.mito,
+                                colname = "percent.mito")
+UMIvsGENE.hk <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                              col = barcode_metrics$n.exp.hkgenes,
+                              colname = "n.exp.hkgenes")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-mito.svg"),UMIvsGENE.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-hk.svg"),UMIvsGENE.hk)
+```
+
+### Examine: mitochondrial gene expression vs housekeeper genes
+
+Usually, barcodes with high mitochondrial gene expression and low housekeeper gene expression are regarded as dying cells or cells undergoing large oxidative stress.
+
+```{r mitvshk}
+HKvsMITO.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics,
+                             col = log10(barcode_metrics$nCount),
+                             colname = "nCount_log10")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-HKvsMITO-UMI.svg"),HKvsMITO.UMI)
+```
+
+## Filtering Counts and Features
+
+```{r}
+#Cut-offs
+nCount_low <- 500
+nCount_high <- NA
+nFeature_low <- NA
+nFeature_high <- NA
+
+#Subset Seurat object
+patient3.filt <- subset(patient3,
+                        nCount_RNA > nCount_low
+                        #& nCount_RNA < nCount_high
+                        #& nFeature_RNA > nFeature_low 
+                        #& nFeature_RNA < nFeature_high
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$countfiltering <- NA
+barcode_metrics[barcode_metrics$nCount > nCount_low
+                #barcode_metrics$nCount < nCount_high & 
+                #barcode_metrics$nFeature > nFeature_low &
+                #barcode_metrics$nFeature < nFeature_high &
+                ,]$countfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$nCount > nCount_low
+                  #barcode_metrics$nCount < nCount_high & 
+                  #barcode_metrics$nFeature > nFeature_low &
+                  #barcode_metrics$nFeature < nFeature_high &
+),]$countfiltering <- "background"
+```
+
+### Examine: UMI counts vs gene counts after filtering
+
+```{r umivsgene-afterfilt}
+#All barcodes, colored by filtered cells with minimum count and feature numbers
+UMIvsGENE.filt <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$countfiltering,
+                                colname = "cells filtered", 
+                                xintercept = log10(c(nCount_low,nCount_high)), 
+                                yintercept = log10(c(nFeature_low,nFeature_high))) 
+
+#only cell barcodes, colored by percent.mito
+UMIvsGENE.cells.mito <- PlotUMIvsGENE(barcode_metrics[barcode_metrics$countfiltering == "cell",],
+                                      col = barcode_metrics[barcode_metrics$countfiltering == "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+# only NOT cells
+UMIvsGENE.notcells.mito <-  PlotUMIvsGENE(barcode_metrics[barcode_metrics$countfiltering != "cell",],
+                                          col = barcode_metrics[barcode_metrics$countfiltering != "cell",]$percent.mito,
+                                          colname = "percent.mito",
+                                          xintercept = log10(c(nCount_low,nCount_high)),
+                                          yintercept = log10(c(nFeature_low,nFeature_high)))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-filt.svg"),UMIvsGENE.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-cells-mito.svg"),UMIvsGENE.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-notcells-mito.svg"),UMIvsGENE.notcells.mito)
+```
+
+### Examine: mitochondrial gene expression and housekeeper genes vs counts
+
+```{r mitandhkvsumi-cf}
+UMIvsMITO.cf.hk <- PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                 col = barcode_metrics[barcode_metrics$countfiltering=="cell",]$n.exp.hkgenes,
+                                 colname = "n.exp.hkgenes")
+UMIvsHK.cf.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                               col = barcode_metrics[barcode_metrics$countfiltering=="cell",]$percent.mito,
+                               colname = "percent.mito")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsMITO-countfilt-hk.svg"),UMIvsMITO.cf.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsHK-countfilt-mito.svg"),UMIvsHK.cf.mito)
+```
+
+### Examine: mitochondrial gene expression vs housekeeper genes
+
+Usually, barcodes with high mitochondrial gene expression and low housekeeper gene expression are regarded as dying cells or cells undergoing large oxidative stress.
+
+```{r mitvshk-cf}
+HKvsMITO.cf.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                col = log10(barcode_metrics[barcode_metrics$countfiltering=="cell",]$nCount),
+                                colname = "nCount_log10")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-HKvsMITO-countfilt-UMI.svg"),HKvsMITO.cf.UMI)
+```
+
+## Filtering all
+
+Complete Filtering including also thresholds for mitochondrial and housekeeper genes.
+
+```{r}
+percent.mito_high <- 10
+n.exp.hkgenes_low <- 30
+
+#make sure, you also enable the nCount and Feature filter here!
+patient3.filt <- subset(patient3,
+                        nCount_RNA > nCount_low
+                        #& nCount_RNA < nCount_high
+                        #& nFeature_RNA > nFeature_low 
+                        #& nFeature_RNA < nFeature_high
+                        & percent.mito < percent.mito_high 
+                        & n.exp.hkgenes > n.exp.hkgenes_low
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$manualfiltering <- NA
+barcode_metrics[barcode_metrics$percent.mito < percent.mito_high & 
+                  barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                  #barcode_metrics$nCount < nCount_high & 
+                  #barcode_metrics$nFeature > nFeature_low &
+                  #barcode_metrics$nFeature < nFeature_high &
+                  barcode_metrics$nCount > nCount_low,]$manualfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$percent.mito < percent.mito_high & 
+                    barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                    #barcode_metrics$nCount < nCount_high & 
+                    #barcode_metrics$nFeature > nFeature_low &
+                    #barcode_metrics$nFeature < nFeature_high &
+                    barcode_metrics$nCount > nCount_low),]$manualfiltering <- "background"
+```
+
+### Examine: UMI counts vs gene counts after filtering
+
+```{r umivsgene-afterfilt}
+#All barcodes, colored by filtered cells with minimum count and feature numbers
+UMIvsGENE.filt <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$manualfiltering,
+                                colname = "cells filtered", 
+                                xintercept = log10(c(nCount_low,nCount_high)), 
+                                yintercept = log10(c(nFeature_low,nFeature_high))) 
+
+#only cell barcodes, colored by percent.mito
+UMIvsGENE.cells.mito <- PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                      col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+# only NOT cells
+UMIvsGENE.notcells.mito <-  PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                          col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                          colname = "percent.mito",
+                                          xintercept = log10(c(nCount_low,nCount_high)),
+                                          yintercept = log10(c(nFeature_low,nFeature_high)))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-filt.svg"),UMIvsGENE.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-cells-mito.svg"),UMIvsGENE.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsGENE-notcells-mito.svg"),UMIvsGENE.notcells.mito)
+```
+
+### Examine: mitochondrial gene expression and housekeeper genes vs counts after filtering
+
+```{r mitandhkvsumi-afterfilt}
+#all barcodes, colored by cells
+UMIvsMITO.filt <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics,
+                                 col = barcode_metrics$manualfiltering,
+                                 colname = "cells filtered",
+                                 xintercept = log10(c(nCount_low,nCount_high)),
+                                 yintercept = percent.mito_high)
+#only cells
+UMIvsMITO.cells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                     col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$n.exp.hkgenes,
+                                     colname = "n.exp.hkgenes",
+                                     xintercept = log10(c(nCount_low,nCount_high)),
+                                     yintercept = percent.mito_high) 
+#only not cells
+UMIvsMITO.notcells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                        col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$n.exp.hkgenes,
+                                        colname = "n.exp.hkgenes",
+                                        xintercept = log10(c(nCount_low,nCount_high)),
+                                        yintercept = percent.mito_high) 
+
+#all barcodes, colored by cells
+UMIvsHK.filt <-  PlotUMIvsHK(barcode_metrics = barcode_metrics,
+                             col = barcode_metrics$manualfiltering,
+                             colname = "cell",
+                             xintercept = log10(c(nCount_low,nCount_high)),
+                             yintercept = n.exp.hkgenes_low)
+#only cells
+UMIvsHK.cells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                  col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                  colname = "percent.mito",
+                                  xintercept = log10(c(nCount_low,nCount_high)),
+                                  yintercept = n.exp.hkgenes_low) 
+
+#only not cells
+UMIvsHK.notcells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                     col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                     colname = "percent.mito",
+                                     xintercept = log10(c(nCount_low,nCount_high)),
+                                     yintercept = n.exp.hkgenes_low) 
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsMITO-filt.svg"),UMIvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsMITO-cells-hk.svg"),UMIvsMITO.cells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsMITO-notcells-hk.svg"),UMIvsMITO.notcells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsHK-filt.svg"),UMIvsHK.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsHK-cells-mito.svg"),UMIvsHK.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-UMIvsHK-notcells-mito.svg"),UMIvsHK.notcells.mito)
+```
+
+### Examine: percent.mito vs n.exp.hkgenes after filtering
+
+```{r HKvsMITO-afterfilt}
+#all barcodes, colored by filtering
+HKvsMITO.filt <- PlotHKvsMITO(barcode_metrics = barcode_metrics,
+                              col = barcode_metrics$manualfiltering,
+                              colname = "cell",
+                              xintercept = n.exp.hkgenes_low,
+                              yintercept = percent.mito_high)
+
+#only cells, colored by nCounts
+HKvsMITO.cells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                   col = log10(barcode_metrics[barcode_metrics$manualfiltering == "cell",]$nCount),
+                                   colname = "nCount_log10",
+                                   xintercept = n.exp.hkgenes_low, 
+                                   yintercept = percent.mito_high)
+
+#only NOT cells, colored by nCounts
+HKvsMITO.notcells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                      col = log10(barcode_metrics[barcode_metrics$manualfiltering != "cell",]$nCount),
+                                      colname = "nCount_log10",
+                                      xintercept = n.exp.hkgenes_low, 
+                                      yintercept = percent.mito_high)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-HKvsMITO-filt.svg"),HKvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-HKvsMITO-cells-UMI.svg"),HKvsMITO.cells.UMI)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-filtering-HKvsMITO-notcells-UMI.svg"),HKvsMITO.notcells.UMI)
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r}
+#log-normalization for slot "data"
+patient3.filt <- NormalizeData(patient3.filt, 
+                               normalization.method = "LogNormalize", #default
+                               scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                               assay = "RNA",
+                               margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+patient3.filt <- FindVariableFeatures(patient3.filt, 
+                                      assay = "RNA",
+                                      selection.method = "vst", #default
+                                      nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data" by all genes, not only most variable ones
+allgenes <- rownames(patient3.filt)
+patient3.filt <- ScaleData(patient3.filt, 
+                           features = allgenes, 
+                           do.scale = T,
+                           do.center = T,
+                           scale.max = 10, 
+                           assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+patient3.filt <- CellCycleScoring(patient3.filt,
+                                  s.features = cc.genes.updated.2019$s.genes,
+                                  g2m.features = cc.genes.updated.2019$g2m.genes, 
+                                  assay="RNA")
+```
+
+## Normalization with SCTransform
+
+```{r}
+patient3.filt <- SCTransform(patient3.filt, 
+                             ncells = ncol(patient3.filt),
+                             assay="RNA", #default
+                             new.assay.name = "SCT", #default
+                             do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                             variable.features.n = 3000, #default set variable features
+                             vars.to.regress = NULL, #default optional variables to regress out
+                             do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                             do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                             return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                             seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+```{r}
+patient3.filt <- RunPCA(patient3.filt, 
+                        npcs = 50,  #number of PCs to use
+                        assay = "SCT",
+                        rev.pca = F, # default, Run cell x gene matrix
+                        weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                        approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                        features = VariableFeatures(patient3.filt,assay = "SCT"), #default
+                        reduction.name = "pca_SCT",
+                        verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCT <- patient3.filt@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(patient3.filt@assays$SCT@scale.data)[VariableFeatures(patient3.filt,assay = "SCT"),]))
+
+#PCA plot
+PCAplot.SCT <- DimPlot(patient3.filt, reduction = "pca_SCT", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 10
+
+#based on PCA
+patient3.filt <- FindNeighbors(patient3.filt, 
+                               dims = 1:numberofPCs, 
+                               reduction = "pca_SCT",
+                               assay = "SCT")
+patient3.filt <- FindClusters(patient3.filt, 
+                              resolution = 1,
+                              random.seed=100)
+
+patient3.filt$seurat_clusters_all_SCT_PCA <- patient3.filt$seurat_clusters
+patient3.filt$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+patient3.filt <- RunUMAP(patient3.filt,
+                         dims = 1:numberofPCs,
+                         assay = "SCT",
+                         umap.method = "uwot", # Seurat default
+                         graph=NULL, #default
+                         reduction="pca_SCT",
+                         reduction.name = "umap_SCT"
+)
+```
+
+Explore UMAP with different annotations
+
+```{r}
+UMAP.SCT.clusPCA <- DimPlot(patient3.filt, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_all_SCT_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.QC <- FeaturePlot(patient3.filt, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCT", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           order = T,
+                           slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-UMAP-clusPCA-noleg.svg"),UMAP.SCT.clusPCA + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-UMAP-QC.svg"),UMAP.SCT.QC, width=10, height=15)
+
+UMAP.SCT.clusPCA
+UMAP.SCT.QC
+```
+
+# Cell Type identification
+
+Manual annotation based on marker gene expression from various literature references.
+
+## Marker Gene Expression
+
+```{r}
+UMAP.SCT.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(patient3.filt,celltypemarkers[[x]],reduction = "umap_SCT"))
+names(UMAP.SCT.marker) <- names(celltypemarkers)
+
+lapply(names(UMAP.SCT.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/patient3-all-SCT-UMAP-marker-",x,".svg"),UMAP.SCT.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+
+UMAP.SCT.marker
+```
+
+## Celltype Annotation
+
+```{r umap-celltype}
+Idents(patient3.filt) <- patient3.filt$seurat_clusters_all_SCT_PCA
+patient3.filt <- RenameIdents(patient3.filt,
+                              "0" = "Tumor",
+                              "1" = "myeloid cells",
+                              "2" = "T-Cells",
+                              "3" = "Fibroblasts"
+)
+patient3.filt$CellType <- Idents(patient3.filt)
+```
+
+## UMAP
+
+```{r}
+UMAP.SCT.celltype <- DimPlot(patient3.filt,
+                             reduction = "umap_SCT", 
+                             pt.size = 1, 
+                             label = T, 
+                             group.by = "CellType") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+ggsave(filename = paste0(OUTPUT,"figs/patient2-all-SCT-UMAP-celltype.svg"),UMAP.SCT.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient2-all-SCT-UMAP-celltype-noleg.svg"),UMAP.SCT.celltype + theme(legend.position = "none") + labs(title = NULL), width=5, height=5)
+UMAP.SCT.celltype
+```
+
+# Save 
+
+```{r}
+#single Seurat object
+save(file = paste0(OUTPUT,"RData/patient3.RData"),patient3.filt)
+#sessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient3-preprocessing-sessionInfo.txt"))
+```

@@ -1,0 +1,781 @@
+---
+title: "Per patient analysis"
+author: "Kai"
+date: "4th July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/alldatasets/"
+```
+
+# Load Seurat Object
+
+```{r}
+load(paste0(OUTPUT,"RData/alltumor-typeanalysis.RData"))
+```
+
+# Subset cells and evaluate subsetting
+
+```{r}
+#subset for every patient
+table(SCC$patients)
+patient <- names(table(SCC$patients)[table(SCC$patients)>50])
+
+SCC.p <- list()
+for (p in patient) {
+  SCC.p[[p]] <- subset(SCC,cells = names(SCC$patients[SCC$patients==p]))
+  
+  DefaultAssay(SCC.p[[p]]) <- "RNA"
+  SCC.p[[p]]@assays$SCT <- NULL
+  SCC.p[[p]]@assays$SCTccmito <- NULL
+  for (x in names(SCC.p[[p]]@reductions)) {SCC.p[[p]]@reductions[[x]] <- NULL}
+}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCCfilt_normalization}
+for (p in patient) {
+  #RNA normalization without regressing, necessary for example for differential gene expression not based on SCTccmito.
+  DefaultAssay(SCC.p[[p]]) <- "RNA"
+  #log-normalization for slot "data"
+  SCC.p[[p]] <- NormalizeData(SCC.p[[p]], 
+                              normalization.method = "LogNormalize", #default
+                              scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                              assay = "RNA",
+                              margin = 1 # default; normalizes across features
+  ) 
+  
+  #Find Variable Features
+  SCC.p[[p]] <- FindVariableFeatures(SCC.p[[p]], 
+                                     assay = "RNA",
+                                     selection.method = "vst", #default
+                                     nfeatures = 2000 #default; only 2000 , 3000 for SCTccmito promises since to "restore" some more VariableFeatures
+  )
+  
+  #scaling for slot "scale.data"
+  SCC.p[[p]] <- ScaleData(SCC.p[[p]], 
+                          features = VariableFeatures(SCC.p[[p]]), 
+                          do.scale = T,
+                          do.center = T,
+                          scale.max = 10,
+                          assay = "RNA")
+}
+```
+
+```{r}
+#from Tirosh et al 2015 cell cycle genes, included in Seurat package the "data" slot is always picked, based on RNA assay
+for (p in patient) {
+  SCC.p[[p]] <- CellCycleScoring(SCC.p[[p]],
+                                 s.features = cc.genes.updated.2019$s.genes,
+                                 g2m.features = cc.genes.updated.2019$g2m.genes, 
+                                 assay="RNA")
+}
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCCfilt_normalization}
+for (p in patient) {
+  SCC.p[[p]] <- SCTransform(SCC.p[[p]], 
+                            ncells = ncol(SCC.p[[p]]),
+                            assay="RNA", #default
+                            new.assay.name = "SCTccmito", #default; overwrites old SCTccmito
+                            do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                            variable.features.n = 3000, #default set variable features
+                            vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                            do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                            do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                            return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                            seed.use = 1448145)
+}
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCTccmito assay
+
+```{r}
+for (p in patient) {
+  SCC.p[[p]] <- RunPCA(SCC.p[[p]], 
+                       npcs = 50,  #number of PCs to use
+                       assay = "SCTccmito",
+                       rev.pca = F, # default, Run cell x gene matrix
+                       weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                       approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                       features = VariableFeatures(SCC.p[[p]],assay = "SCTccmito"), #default
+                       reduction.name = "pca_SCTccmito",
+                       verbose = F)
+}
+```
+
+```{r}
+PCAvar.SCTccmito <- list()
+PCAplot.SCTccmito <- list()
+PCAelbowplot.SCTccmito <- list()
+PCAsumplot.SCTccmito <- list()
+for (p in patient) {
+  #calculate the % variance explained
+  PCAvar.SCTccmito[[p]] <- SCC.p[[p]]@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC.p[[p]]@assays$SCTccmito@scale.data)[VariableFeatures(SCC.p[[p]],assay = "SCTccmito"),]))
+  
+  #PCA plot
+  PCAplot.SCTccmito[[p]] <- DimPlot(SCC.p[[p]], reduction = "pca_SCTccmito", dims = c(1,2), group.by = "patients") + 
+    labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[[p]][1]*100,digits = 2),"% variance)"),
+         y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[[p]][2]*100,digits = 2),"% variance)")) +
+    theme_jb()
+  
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA.svg"),PCAplot.SCTccmito[[p]], width = 5, height = 5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+  
+  #Elbow Plot
+  PCAelbowplot.SCTccmito[[p]] <- ggplot(data=data.frame(var=PCAvar.SCTccmito[[p]],
+                                                        PC=1:length(PCAvar.SCTccmito[[p]]))[1:50,]) +
+    geom_point(mapping = aes(x=PC,y=var)) +
+    labs(x="principal component", y="% variance",title = p) +
+    scale_x_continuous(breaks=seq(0,50,5)) +
+    theme_jb()
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito[[p]], width = 5, height = 5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+  
+  # cumulative Variance Plot
+  PCAsumplot.SCTccmito[[p]] <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito[[p]]),PC=1:length(PCAvar.SCTccmito[[p]]))[1:50,]) +
+    geom_point(mapping = aes(x=PC,y=cumvar)) +
+    labs(x="principal component", y="% cumulative variance") +
+    scale_x_continuous(breaks=seq(0,50,5)) +
+    theme_jb()
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito[[p]], width = 5, height = 5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+}
+
+PCAplot.SCTccmito
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+```
+
+## Graph-based clustering
+
+Made expection for patient 3, since it does not work with resolution 2 probably because of too less cells and heterogeneity.
+
+```{r FindClusters}
+#define number of components per patient
+numberofPCs <- 20
+
+for (p in patient) {
+  DefaultAssay(SCC.p[[p]]) <- "SCTccmito"
+  #based on PCA
+  SCC.p[[p]] <- FindNeighbors(SCC.p[[p]], 
+                              dims = 1:numberofPCs, 
+                              reduction = "pca_SCTccmito",
+                              assay = "SCTccmito")
+  SCC.p[[p]] <- FindClusters(SCC.p[[p]], 
+                             resolution = ifelse(p %in% names(table(SCC$patients)[table(SCC$patients)<500]),1,2),
+                             random.seed=100)
+  
+  SCC.p[[p]]$seurat_clusters_perpat_SCTccmito_PCA <- SCC.p[[p]]$seurat_clusters
+  SCC.p[[p]]$seurat_clusters <- NULL 
+}
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+UMAP.SCTccmito.clusPCA <- list()
+for (p in patient) {
+  SCC.p[[p]] <- RunUMAP(SCC.p[[p]],
+                        dims = 1:numberofPCs,
+                        assay = "SCTccmito",
+                        umap.method = "uwot", # Seurat default
+                        graph=NULL, #default
+                        reduction="pca_SCTccmito",
+                        reduction.name = "umap_SCTccmito",
+                        reduction.key = "umap_SCTccmito")
+}
+```
+
+Explore UMAP with different annotations
+
+```{r}
+UMAP.SCTccmito.clusPCA <- list()
+UMAP.SCTccmito.Lok <- list()
+UMAP.SCTccmito.epitype <- list()
+for (p in patient) {
+  UMAP.SCTccmito.clusPCA[[p]] <- DimPlot(SCC.p[[p]], 
+                                         reduction = "umap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = T, 
+                                         group.by = "seurat_clusters_perpat_SCTccmito_PCA") + 
+    labs(x="UMAP_1",y="UMAP_2",title=p) +
+    theme_jb_nogrid()
+  UMAP.SCTccmito.Lok[[p]] <- DimPlot(SCC.p[[p]], 
+                                     reduction = "umap_SCTccmito", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "Lok") + 
+    labs(x="UMAP_1",y="UMAP_2",title=p) +
+    theme_jb_nogrid()
+  UMAP.SCTccmito.epitype[[p]] <- DimPlot(SCC.p[[p]], 
+                                     reduction = "umap_SCTccmito", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "epitype") + 
+    labs(x="UMAP_1",y="UMAP_2",title=p) +
+    theme_jb_nogrid()
+  
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-Lok.svg"),UMAP.SCTccmito.Lok[[p]])
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-Lok-noleg.svg"),UMAP.SCTccmito.Lok[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-epitype.svg"),UMAP.SCTccmito.epitype[[p]])
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-epitype-noleg.svg"),UMAP.SCTccmito.epitype[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+}
+```
+
+```{r}
+UMAP.SCTccmito.clusPCA
+```
+
+```{r}
+UMAP.SCTccmito.Lok
+```
+
+```{r}
+UMAP.SCTccmito.epitype
+```
+
+# Check quality criteria
+
+```{r}
+qualfeat <- c("nFeature_RNA_log10", "nCount_RNA_log10","percent.mito", "n.exp.hkgenes","S.Score","G2M.Score")
+
+QC.umap <- list()
+UMAP.SCTccmito.phase <- list()
+for (p in patient) {
+  QC.umap[[p]] <- FeaturePlot(SCC.p[[p]],
+                              features = qualfeat,
+                              reduction = "umap_SCTccmito",
+                              cols = c("grey95","blue"),
+                              ncol = 2, 
+                              pt.size = 1,
+                              order=T,
+                              combine = F)
+  names(QC.umap[[p]]) <- qualfeat
+  
+  UMAP.SCTccmito.phase[[p]] <- DimPlot(SCC.p[[p]], 
+                                       reduction = "umap_SCTccmito", 
+                                       pt.size = 1, 
+                                       label = F, 
+                                       group.by = "Phase") + 
+    theme_jb_nogrid()
+  
+  lapply(qualfeat,function(x) ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-QC-",x,".svg"),QC.umap[[p]][[x]] + theme_jb_nogrid(), width = 5,height=5))
+  #nolegend
+  lapply(qualfeat,function(x) ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-QC-",x,"-noleg.svg"),QC.umap[[p]][[x]] + theme_jb_nogrid()+ theme(legend.position = "none"), width = 5,height=5))
+  
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-Phase.svg"),UMAP.SCTccmito.phase[[p]])
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-UMAP-Phase-noleg.svg"),UMAP.SCTccmito.phase[[p]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+}
+```
+
+# Differential expression
+
+```{r}
+marker.allgenes <- list()
+for (p in names(SCC.p)) {
+  SCC.p[[p]]$patcluster <- factor(paste0(p,"_",SCC.p[[p]]$seurat_clusters_perpat_SCTccmito_PCA),levels = unique(paste0(p,"_",SCC.p[[p]]$seurat_clusters_perpat_SCTccmito_PCA))[order(as.numeric(unique(SCC.p[[p]]$seurat_clusters_perpat_SCTccmito_PCA)))])
+  marker.allgenes[[p]] <- calculate_foldchanges(SCC.p[[p]],SCC.p[[p]]$patcluster)
+}
+marker.allgenes.df <- do.call(rbind,marker.allgenes)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+marker.filt <- marker.allgenes.df[(marker.allgenes.df$pct.1 > 0.1 | marker.allgenes.df$pct.2 > 0.1) & abs(marker.allgenes.df$avg_log2FC)>0.25,]
+```
+
+# Heatmaps with only top differentially expressed genes based on log foldchange
+
+```{r}
+#number of topgenes to be plotted
+topgenes = 10
+
+#choose those top genes
+marker.filt.percluster <- lapply(unique(marker.filt$cluster), function(x) marker.filt[marker.filt$cluster==x,])
+names(marker.filt.percluster) <- unique(marker.filt$cluster)
+
+top.logFC <- list()
+highlightgenes <- list()
+for (cl in names(marker.filt.percluster)) {
+  #top avg FC
+  top.logFC[[cl]] <- head(marker.filt.percluster[[cl]][order(marker.filt.percluster[[cl]]$avg_log2FC,decreasing = T),], n=topgenes)
+  #create dataframe
+  highlightgenes[[cl]] <- data.frame(genes=top.logFC[[cl]]$gene, state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes <- as.data.frame(data.table::rbindlist(highlightgenes))
+
+expr.RNAscaledata <- list()
+expr.RNAscaledata.hl <- list()
+expr.RNAscaledata.hl.all <- list()
+colorbreaks.RNAscaledata.hl <- list()
+diffexprhm.hl <- list()
+for (p in names(SCC.p)) {
+  #subset expression matrix by highlight genes
+  SCC.p[[p]] <- ScaleData(SCC.p[[p]], 
+                          features = as.character(highlightgenes$genes), 
+                          do.scale = T,
+                          do.center = T,
+                          scale.max = 10,
+                          assay = "RNA")
+  
+  expr.RNAscaledata[[p]] <- as.data.frame(GetAssayData(SCC.p[[p]], assay = "RNA", slot = "scale.data"))
+  expr.RNAscaledata.hl[[p]] <- expr.RNAscaledata[[p]][as.character(highlightgenes$genes[unlist(lapply(strsplit(highlightgenes$state,split = "_"),function(x) x[1]))==p]),]
+  expr.RNAscaledata.hl.all[[p]] <- expr.RNAscaledata[[p]][as.character(highlightgenes$genes),]
+  
+  
+#set colorbreaks as above
+  colorbreaks.RNAscaledata.hl[[p]] <- c(-max(abs(expr.RNAscaledata.hl[[p]])),
+                                   -(mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0])),
+                                   0,
+                                   mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]),
+                                   max(abs(expr.RNAscaledata.hl[[p]])))
+  
+  #Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+  diffexprhm.hl[[p]] <- Heatmap(expr.RNAscaledata.hl[[p]],
+                                name="scale.data",
+                                col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl[[p]], colors = c("red","purple", "black", "yellow","white")),
+                                show_column_names = F,
+                                show_row_names = T,
+                                cluster_columns = T,
+                                cluster_column_slices = F,
+                                clustering_method_columns = "ward.D2",
+                                clustering_distance_columns = "euclidean",
+                                column_split = SCC.p[[p]]$patcluster,
+                                row_split = factor(highlightgenes$state[unlist(lapply(strsplit(highlightgenes$state,split = "_"),function(x) x[1]))==p],levels = levels(SCC.p[[p]]$patcluster)),
+                                cluster_rows = F,
+                                cluster_row_slices = F,
+                                row_order = rownames(expr.RNAscaledata.hl[[p]]),
+                                row_title_rot = 0,
+                                column_title_rot = 90,
+                                #graphic options
+                                row_names_gp = gpar(fontsize=11),
+                                column_names_gp = gpar(fontsize=11),
+                                row_title_gp = gpar(fontsize=11),
+                                column_title_gp = gpar(fontsize=11),
+                                heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                border = T,
+                                use_raster = T,
+                                raster_device = "CairoPNG",
+                                raster_quality = 4,
+                                heatmap_height = unit(length(highlightgenes$state[unlist(lapply(strsplit(highlightgenes$state,split = "_"),function(x) x[1]))==p])/5,"in"),
+                                heatmap_width = unit(10,"in"))
+  
+  #Save Heatmap
+  pdf(paste0(OUTPUT,"figs/alltumor-",p,"-SCTccmito-diffexpr-clusPCA-HM-RNAscaledata-highlighgenes.pdf"), width=20, height=length(highlightgenes$state[unlist(lapply(strsplit(highlightgenes$state,split = "_"),function(x) x[1]))==p])/3)
+  print(diffexprhm.hl[[p]])
+  dev.off()
+}
+```
+
+# GSEA
+
+```{r}
+library(fgsea)
+#read in MsigDB pathway from downloads
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+GS <- c(GOBP,HM)
+
+#get FCranks
+FCranks <- list()
+for (cl in unique(marker.filt$cluster)) {
+  FCranks[[cl]] <- marker.filt[marker.filt$cluster==cl,]$avg_log2FC
+  names(FCranks[[cl]]) <- marker.filt[marker.filt$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks[[cl]][is.infinite(FCranks[[cl]])] <- -1000
+}
+
+#run fgsea
+GS.gsea <- list()
+for (cl in levels(marker.filt$cluster)) {
+  GS.gsea[[cl]] <- fgsea(pathways=GS,
+                         stats=FCranks[[cl]],
+                         minSize=15,
+                         maxSize=500,
+                         nperm=10000)
+}
+
+GS.gsea.plot <- list()
+GS.gseavis <- list()
+GS.gseavis.comb <- list()
+for (p in names(SCC.p)) {
+  #remove GO in name and put to lower cases
+  GS.gsea.plot[[p]] <- lapply(GS.gsea[unlist(lapply(strsplit(names(GS.gsea),split = "_"),function(x) x[1]))==p],function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+  #abbreviate some GO terms
+  GS.gsea.plot[[p]] <- lapply(GS.gsea.plot[[p]],function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                               gsub("nonsense mediated decay","NMD",x$pathway)); x})
+  #Plotting
+  GS.gseavis[[p]] <- lapply(names(GS.gsea.plot[[p]]), function(x) try(GSEAvis(GSEAdf = GS.gsea.plot[[p]][[x]],
+                                                                              pvalthres = NULL,
+                                                                              NESthres = NULL,
+                                                                              npathways = 5,
+                                                                              sort = "NES",
+                                                                              positive = T) +
+                                                                        labs(x=x,y="") +
+                                                                        scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.plot[[p]], function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$padj[1:5]}))))),colours = c("white","blue")) +
+                                                                        coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.plot[[p]],function(x) {y <- x[x$ES>0,]; y[order(y$ES,decreasing = T),]$NES[1:5]}))))) +
+                                                                        scale_y_continuous(breaks = seq(0,10,0.5))
+  )) 
+  names(GS.gseavis[[p]]) <- names(GS.gsea.plot[[p]])
+  #lapply(names(GS.gsea.plot[[p]]), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-",p,"-clus10-GS-top5byES-",x,".svg"),GS.gseavis[[p]][[x]],width=10, height=5)))
+  
+  #All GSEA Plots in one file
+  library(cowplot)
+  GS.gseavis.comb[[p]] <- lapply(1:(length(GS.gseavis[[p]])-1), function(x) {
+    GS.gseavis[[p]][[x]] + 
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+  })
+  GS.gseavis.comb[[p]][[length(GS.gseavis.comb[[p]])+1]] <- GS.gseavis[[p]][[length(GS.gseavis[[p]])]]
+  try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-",p,"-clus10-GS-top5byES-all.svg"),
+             plot_grid(plotlist = GS.gseavis.comb[[p]],ncol=1,align = "v",labels=NULL),
+             width=8, 
+             height=14))
+  
+  try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-",p,"-clus10-GS-top5byES-all-noleg.svg"),
+             plot_grid(plotlist = lapply(GS.gseavis.comb[[p]],function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+             width=8, 
+             height=14))
+  
+  GS.gseavis.comb[[p]] <- lapply(1:(length(GS.gseavis[[p]])), function(x) {
+    GS.gseavis[[p]][[x]] + 
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+  })
+  try(ggsave(filename = paste0(OUTPUT,"figs/alltumor-diffexpr-SCTccmito-",p,"-clus10-GS-top5byES-all-nolegaxis.svg"),
+             plot_grid(plotlist = lapply(GS.gseavis.comb[[p]],function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+             width=8, 
+             height=14))
+}
+```
+
+# Annotation of patient-specific clusters
+
+```{r}
+#using heatmap with top diffexpr genes and cosine similarity
+#use similar annotations than in patient1 sample
+SCC.p$`1`$pattumortype <- SCC.p$`1`$tumortype
+
+SCC.p$`2`$pattumortype <- as.character(SCC.p$`2`$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$`2`$pattumortype[SCC.p$`2`$pattumortype=="0"] <- "pEMT"
+SCC.p$`2`$pattumortype[SCC.p$`2`$pattumortype=="1"] <- "pEMT-stress"
+SCC.p$`2`$pattumortype[SCC.p$`2`$pattumortype=="2"] <- "homeostasis"
+SCC.p$`2`$pattumortype[SCC.p$`2`$pattumortype=="3"] <- "epi"
+
+SCC.p$`3`$pattumortype <- as.character(SCC.p$`3`$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$`3`$pattumortype[SCC.p$`3`$pattumortype=="2"] <- "3"
+SCC.p$`3`$pattumortype[SCC.p$`3`$pattumortype=="1"] <- "2"
+SCC.p$`3`$pattumortype[SCC.p$`3`$pattumortype=="0"] <- "1"
+
+SCC.p$`4`$pattumortype <- as.character(SCC.p$`4`$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$`4`$pattumortype[SCC.p$`4`$pattumortype=="0"] <- "epi-1"
+SCC.p$`4`$pattumortype[SCC.p$`4`$pattumortype=="1"] <- "epi-2"
+SCC.p$`4`$pattumortype[SCC.p$`4`$pattumortype=="2"] <- "pEMT"
+
+SCC.p$`7`$pattumortype <- as.character(SCC.p$`7`$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$`7`$pattumortype[SCC.p$`7`$pattumortype=="0"] <- "oxphos"
+SCC.p$`7`$pattumortype[SCC.p$`7`$pattumortype=="1"] <- "pEMT"
+SCC.p$`7`$pattumortype[SCC.p$`7`$pattumortype=="2"] <- "epi"
+
+SCC.p$HN01$pattumortype <- as.character(SCC.p$HN01$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="0"] <- "epi-1"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="1"] <- "CXCL9/10/11/14"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="2"] <- "pEMT-1"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="3"] <- "pEMT-2"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="4"] <- "pEMT-3"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="5"] <- "pEMT-4"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="6"] <- "pEMT-5"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="7"] <- "stress"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="8"] <- "homeostasis"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="9"] <- "hypoxia"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="10"] <- "CXCL1/3/8"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="11"] <- "pEMT-CXCL9/10/11"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="12"] <- "epi-3"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="13"] <- "pEMT-7"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="14"] <- "pEMT-8"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="15"] <- "epi-4"
+SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="16"] <- "epi-5"
+  
+SCC.p$HN07$pattumortype <- as.character(SCC.p$HN07$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="0"] <- "hypoxia-pEMT"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="1"] <- "pEMT-stress-1"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="2"] <- "pEMT-stress-2"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="3"] <- "hypoxia"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="4"] <- "epi-1"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="5"] <- "pEMT-stress-3"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="6"] <- "homeostasis"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="7"] <- "oxphos-1"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="8"] <- "oxphos-2"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="9"] <- "oxphos-3"
+SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="10"] <- "epi-2"
+
+SCC.p$HN08$pattumortype <- as.character(SCC.p$HN08$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="0"] <- "Immune-1 (PIGR)"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="1"] <- "pEMT-1"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="2"] <- "pEMT-2"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="3"] <- "epi-1"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="4"] <- "Immune-2 (PIGR)"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="5"] <- "epi-2"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="6"] <- "epi-3"
+SCC.p$HN08$pattumortype[SCC.p$HN08$pattumortype=="7"] <- "Immune-3 (PIGR)"
+
+SCC.p$HN09$pattumortype <- as.character(SCC.p$HN09$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN09$pattumortype[SCC.p$HN09$pattumortype=="0"] <- "pEMT"
+SCC.p$HN09$pattumortype[SCC.p$HN09$pattumortype=="1"] <- "mix"
+SCC.p$HN09$pattumortype[SCC.p$HN09$pattumortype=="2"] <- "epi"
+
+SCC.p$HN10$pattumortype <- as.character(SCC.p$HN10$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN10$pattumortype[SCC.p$HN10$pattumortype=="0"] <- "pEMT"
+SCC.p$HN10$pattumortype[SCC.p$HN10$pattumortype=="1"] <- "epi"
+
+SCC.p$HN11$pattumortype <- as.character(SCC.p$HN11$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN11$pattumortype[SCC.p$HN11$pattumortype=="0"] <- "epi"
+SCC.p$HN11$pattumortype[SCC.p$HN11$pattumortype=="1"] <- "pEMT"
+
+SCC.p$HN15$pattumortype <- as.character(SCC.p$HN15$seurat_clusters_perpat_SCTccmito_PCA)
+SCC.p$HN15$pattumortype[SCC.p$HN15$pattumortype=="0"] <- "pEMT-1"
+SCC.p$HN15$pattumortype[SCC.p$HN15$pattumortype=="1"] <- "epi"
+SCC.p$HN15$pattumortype[SCC.p$HN15$pattumortype=="2"] <- "pEMT-2"
+```
+
+plot types on UMAPs
+
+```{r}
+umap.SCTccmito.pattumortype <- list()
+for (p in names(SCC.p)) {
+  umap.SCTccmito.pattumortype[[p]] <- DimPlot(SCC.p[[p]],
+                                              reduction="umap_SCTccmito",
+                                              pt.size = 1,
+                                              label = T,
+                                              group.by = "pattumortype") + 
+    ggtitle(p) +
+    labs(x="UMAP_1",y="UMAP_2") +
+    theme_jb_nogrid()
+  
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-perpatient-",p,"-SCTccmito-UMAP-pattumortype.svg"),umap.SCTccmito.pattumortype[[p]], width=2.5, height=2.5)
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-perpatient-",p,"-SCTccmito-UMAP-pattumortype-noleg.svg"),umap.SCTccmito.pattumortype[[p]] + theme(legend.position = "none") + ggtitle(NULL) + scale_x_continuous(breaks = c(-4,0,4)) + scale_y_continuous(breaks = c(-4,-2,0,2,4)), width=2.5, height=2.5)
+}
+
+umap.SCTccmito.pattumortype
+```
+
+plot on central UMAP
+
+```{r}
+#show on UMAP
+cells_clus <- list()
+for (p in names(SCC.p)) {
+  cells_clus[[p]] <- paste0(SCC.p[[p]]$pattumortype,"_",p)
+  names(cells_clus[[p]]) <- names(SCC.p[[p]]$pattumortype)
+}
+names(cells_clus) <- NULL
+cells_clus <- unlist(cells_clus)
+
+#match in SCC
+SCC$pattumortype <- paste0("pat-",SCC$patients)
+SCC$pattumortype[names(cells_clus)] <- cells_clus
+SCC$pattumortype[SCC$pattumortype %in% paste0("pat-",c("5","6","HN05","HN06"))] <- "lowpat_NA"
+#unify
+SCC$pattumortype_ov <- unlist(lapply(strsplit(SCC$pattumortype,split = "_"),function(x) x[1]))
+SCC$pattumortype_ov[SCC$pattumortype_ov=="1"] <- "NA"
+SCC$pattumortype_ov[SCC$pattumortype_ov=="2"] <- "NA"
+SCC$pattumortype_ov[SCC$pattumortype_ov=="3"] <- "NA"
+SCC$pattumortype_ov <- unlist(lapply(strsplit(SCC$pattumortype_ov,split = "-"),function(x) x[1]))
+
+umap.pattumortype_ov <- DimPlot(SCC,
+                                reduction="umap_SCTccmito",
+                                pt.size = 1,
+                                label = F,
+                                group.by = "pattumortype_ov") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-pattumortype_ov.svg"),umap.pattumortype_ov, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-pattumortype_ov.svg-noleg.svg"),umap.pattumortype_ov + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+
+umapharmony.pattumortype_ov <- DimPlot(SCC,
+                                       reduction="humap_SCTccmito",
+                                       pt.size = 1,
+                                       label = F,
+                                       group.by = "pattumortype_ov") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-pattumortype_ov.svg"),umapharmony.pattumortype_ov, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-pattumortype_ov.svg-noleg.svg"),umapharmony.pattumortype_ov + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+
+umap.pattumortype_ov 
+umapharmony.pattumortype_ov
+```
+
+# Similarity between patients using cosine similarity
+
+```{r}
+marker.allgenes.tt <- list()
+for (p in names(SCC.p)) {
+  marker.allgenes.tt[[p]] <- calculate_foldchanges(SCC.p[[p]],paste0(SCC.p[[p]]$pattumortype,"_",p))
+}
+
+marker.allgenes.tt.df <- do.call(rbind,marker.allgenes.tt)
+marker.allgenes.tt.df.wide <- reshape2::dcast(data = marker.allgenes.tt.df,formula = gene ~ cluster,value.var = "avg_log2FC")
+rownames(marker.allgenes.tt.df.wide) <- marker.allgenes.tt.df.wide$gene
+marker.allgenes.tt.df.wide <- marker.allgenes.tt.df.wide[,-1]
+
+cosinesim.tt <- lsa::cosine(as.matrix(marker.allgenes.tt.df.wide))
+```
+
+```{r}
+rownames(cosinesim.tt) <- sub("[(]","",sub("[)]","",sub("Immune ","",rownames(cosinesim.tt))))
+colnames(cosinesim.tt) <- sub("[(]","",sub("[)]","",sub("Immune ","",colnames(cosinesim.tt))))
+
+rowpats <- unlist(lapply(strsplit(rownames(cosinesim.tt),split = "_"),function(x) x[2]))
+names(rowpats) <- rownames(cosinesim.tt)
+
+row_anno <- rowAnnotation(foo = anno_mark(at = which(rowpats %in% c("HN01")),labels = sub("_HN01","",rownames(cosinesim.tt)[rowpats %in% c("HN01")]),side = "left"),
+                          annotation_name_gp = gpar(fontsize=11))
+bottom_anno <- columnAnnotation(foo = anno_mark(at = which(rowpats %in% c("1")),labels = sub("_1","",rownames(cosinesim.tt)[rowpats %in% c("1")]),side = "bottom"),
+                          annotation_name_gp = gpar(fontsize=11))
+
+cosinesim.tt.hm.pub.tri <- Heatmap(cosinesim.tt,
+                                       name="cosine similarity",
+                                       col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
+                                       show_column_names = F,
+                                       show_row_names = F,
+                                       cluster_rows = T,
+                                       clustering_distance_rows = "manhattan",
+                                       clustering_method_rows = "ward.D2",
+                                       row_dend_reorder = T,
+                                       cluster_columns = T,
+                                       clustering_distance_columns =  "manhattan",
+                                       clustering_method_columns = "ward.D2",
+                                       column_dend_reorder = T,
+                                       column_dend_side = "bottom",
+                                       rect_gp = gpar(type="none"),
+                                       cell_fun = function(j, i, x, y, w, h, fill) {
+                                         if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
+                                           grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
+                                         }
+                                       },
+                                       left_annotation = row_anno,
+                                       bottom_annotation = bottom_anno,
+                                       #graphic options
+                                       show_row_dend = F,
+                                       column_title_rot = 90,
+                                       row_names_gp = gpar(fontsize=11),
+                                       column_names_gp = gpar(fontsize=11),
+                                       row_title_gp = gpar(fontsize=11),
+                                       heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                       border = F,
+                                       column_dend_height = unit(0.2,"in"),
+                                       row_dend_width = unit(0.2,"in"),
+                                       width = unit(6,"in"),
+                                       height = unit(6,"in")
+)
+
+pdf(paste0(OUTPUT,"figs/alltumor-perpatients-SCTccmito-pattumortype-cosinesim-pub-tri.pdf"), width=20, height=20)
+cosinesim.tt.hm.pub.tri
+dev.off()
+
+cosinesim.tt.hm.pub.tri.n <- Heatmap(cosinesim.tt,
+                                       name="cosine similarity",
+                                       col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
+                                       show_column_names = F,
+                                       show_row_names = T,row_names_side = "left",
+                                       cluster_rows = T,
+                                       clustering_distance_rows = "manhattan",
+                                       clustering_method_rows = "ward.D2",
+                                       row_dend_reorder = T,
+                                       cluster_columns = T,
+                                       clustering_distance_columns =  "manhattan",
+                                       clustering_method_columns = "ward.D2",
+                                       column_dend_reorder = T,
+                                       column_dend_side = "bottom",
+                                       rect_gp = gpar(type="none"),
+                                       cell_fun = function(j, i, x, y, w, h, fill) {
+                                         if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
+                                           grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
+                                         }
+                                       },
+                                       #graphic options
+                                       show_row_dend = F,
+                                       column_title_rot = 90,
+                                       row_names_gp = gpar(fontsize=9),
+                                       column_names_gp = gpar(fontsize=11),
+                                       row_title_gp = gpar(fontsize=11),
+                                       heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                       border = F,
+                                       column_dend_height = unit(0.2,"in"),
+                                       row_dend_width = unit(0.2,"in"),
+                                       width = unit(8,"in"),
+                                       height = unit(8,"in")
+)
+
+pdf(paste0(OUTPUT,"figs/alltumor-perpatients-SCTccmito-pattumortype-cosinesim-pub-tri-name.pdf"), width=20, height=20)
+cosinesim.tt.hm.pub.tri.n
+dev.off()
+
+#save cluster order for dorothea plot
+clusterorder <- colnames(cosinesim.tt.no3)[column_order(cosinesim.tt.hm.no3.pub.tri)]
+```
+
+## Characterize similarity across patient using overlapping differentially expressed genes 
+
+```{r}
+log2FCthres <- 0.5
+
+#get DGE per cluster
+marker.allgenes.tt.df.log2FC <- marker.allgenes.tt.df[marker.allgenes.tt.df$avg_log2FC>log2FCthres,]
+threslog2FC.form <- lapply(unique(marker.allgenes.tt.df.log2FC$cluster),function(x) marker.allgenes.tt.df.log2FC[marker.allgenes.tt.df.log2FC$cluster==x,]$gene)
+names(threslog2FC.form) <- unique(marker.allgenes.tt.df.log2FC$cluster)
+
+#get the intersects of identified cluster
+cosclus <- unlist(lapply(1:length(column_order(cosinesim.tt.hm.no3.split)),function(x) {
+  y <- rep(as.character(x),length(column_order(cosinesim.tt.hm.no3.split)[[x]]))
+  names(y) <- colnames(cosinesim.tt.no3)[column_order(cosinesim.tt.hm.no3.split)[[x]]]
+  y
+}))
+cosclus <- factor(cosclus,levels=unique(cosclus)[order(as.numeric(unique(cosclus)))])
+
+# how many clusters have how many genes DE?
+cosclus.is <- lapply(unique(cosclus), function(z) {
+  sort(table(unlist(threslog2FC.form[names(cosclus[cosclus==z])])),decreasing = T)
+})
+names(cosclus.is) <- unique(cosclus)
+
+cosclus.is.norm <- lapply(names(cosclus.is),function(z) round(cosclus.is[[z]] / table(cosclus)[[z]],digits = 2))
+names(cosclus.is.norm) <- names(cosclus.is)
+
+cosclus.is.norm.filt <- lapply(cosclus.is.norm, function(x) x[x>=0.5])
+
+cosclus.is.norm.filt
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/alltumor-perpatients-perpatient.RData"),SCC.p)
+save(file = paste0(OUTPUT,"RData/alltumor-all-perpatient.RData"),SCC,clusterorder)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/alltumor-perpatients-perpatient-subset-sessionInfo.txt"))
+```

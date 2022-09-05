@@ -1,0 +1,651 @@
+---
+title: "EMP analysis"
+author: "Kai"
+date: "27th July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(slingshot)
+library(ComplexHeatmap)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Load Seurat Object
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-tumorfilt-typeanalysis.RData"))
+```
+
+same colors for tumortype
+```{r}
+tumorcol <- colorfunc(levels(patient1.tumor$tumortype_ov))
+newtumorcol <- c(rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[names(tumorcol)=="mix"],
+                 rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[!names(tumorcol) %in% c("epi","pEMT","mix")]
+                 )
+names(newtumorcol)[1:4] <- paste0("pEMT-",1:4)
+names(newtumorcol)[6:9] <- paste0("epi-",1:4)
+
+shadecol <- c(rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="pEMT"],"#FFFFFF"))(6)[c(2,4)],
+                 tumorcol[names(tumorcol)=="mix"],
+                 rev(colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#000000"))(8)[c(2,4)]),
+                 colorRampPalette(colors = c(tumorcol[names(tumorcol)=="epi"],"#FFFFFF"))(6)[c(2,4)],
+                 unlist(lapply(tumorcol[!names(tumorcol) %in% c("pEMT","epi","mix")],function(x) colorRampPalette(colors = c(x,"#FFFFFF"))(6)[5]))
+                 )
+names(shadecol)[1:4] <- paste0("pEMT-",1:4)
+names(shadecol)[6:9] <- paste0("epi-",1:4)
+```
+
+# Differential expression between EMP-related clusters
+
+```{r}
+#differential expression between EMP phenotypes
+Idents(patient1.tumor) <- patient1.tumor$tumortype
+EMPclus <- c(grep("pEMT",levels(Idents(patient1.tumor)),value = T),"mix",grep("epi",levels(Idents(patient1.tumor)),value = T))
+
+patient1.EMPclus <- lapply(EMPclus, function(clus) {
+  temp <- FoldChange(patient1.tumor, 
+                     features = NULL,
+                     pseudocount.use = 1,
+                     ident.1 = clus, 
+                     ident.2 = EMPclus,
+                     assay = "RNA",
+                     slot = "data")
+  temp$gene <- rownames(temp)
+  temp$cluster <- clus
+  temp
+})
+names(patient1.EMPclus) <- EMPclus
+patient1.EMPclus <- do.call(rbind,patient1.EMPclus)
+patient1.EMPclus$cluster <- factor(patient1.EMPclus$cluster,levels = EMPclus)
+
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+patient1.EMPclus.f <- patient1.EMPclus[(patient1.EMPclus$pct.1 > 0.1 | patient1.EMPclus$pct.2 > 0.1) & abs(patient1.EMPclus$avg_log2FC)>0.25,]
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+library(fgsea)
+FCranks.EMPclus <- list()
+for (cl in unique(patient1.EMPclus.f$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.EMPclus[[cl]] <- patient1.EMPclus.f[patient1.EMPclus.f$cluster==cl,]$avg_log2FC
+  names(FCranks.EMPclus[[cl]]) <- patient1.EMPclus.f[patient1.EMPclus.f$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.EMPclus[[cl]][is.infinite(FCranks.EMPclus[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.EMPclus <- list()
+for (cl in levels(patient1.EMPclus.f$cluster)) {
+  GS.gsea.EMPclus[[cl]] <- fgsea(pathways=GS,
+                                 stats=FCranks.EMPclus[[cl]],
+                                 minSize=15,
+                                 maxSize=500,
+                                 nperm=10000)
+}
+
+#remove GO in name and put to lower cases
+GS.gsea.EMPclus.plot <- lapply(GS.gsea.EMPclus,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.EMPclus.plot <- lapply(GS.gsea.EMPclus.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                   gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+numberofGS = 5
+
+GS.gseavis.EMPclus <- lapply(names(GS.gsea.EMPclus.plot), function(x) {
+  try(GSEAvis(GSEAdf = GS.gsea.EMPclus.plot[[x]],
+              pvalthres = NULL,
+              NESthres = NULL,
+              npathways = numberofGS,
+              sort = "NES",
+              positive = T) +
+        labs(x=x,y="") +
+        scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.EMPclus.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$padj[1:numberofGS]}))))),
+                             colours = c("white","blue")) +
+        coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.EMPclus.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$NES[1:numberofGS]}))))) +
+        scale_y_continuous(breaks = seq(0,20,0.5))
+  )}) 
+names(GS.gseavis.EMPclus) <- names(GS.gsea.EMPclus.plot)
+lapply(names(GS.gsea.EMPclus.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-diffexpr-SCTccmito-EMPclus-GS-top",numberofGS,"byNES-",x,".svg"),GS.gseavis.EMPclus[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+library(cowplot)
+GS.gseavis.EMPclus.comb <- lapply(1:(length(GS.gseavis.EMPclus)-1), function(x) {
+  GS.gseavis.EMPclus[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gseavis.EMPclus.comb[[length(GS.gseavis.EMPclus.comb)+1]] <- GS.gseavis.EMPclus[[length(GS.gseavis.EMPclus)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-diffexpr-SCTccmito-EMPclus-GS-top",numberofGS,"byNES-all.svg"),
+           plot_grid(plotlist = GS.gseavis.EMPclus.comb,ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-diffexpr-SCTccmito-EMPclus-GS-top",numberofGS,"byNES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.EMPclus.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+
+GS.gseavis.EMPclus.comb <- lapply(1:(length(GS.gseavis.EMPclus)), function(x) {
+  GS.gseavis.EMPclus[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-diffexpr-SCTccmito-EMPclus-GS-top",numberofGS,"byNES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.EMPclus.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=8))
+```
+
+## Heatmap of top differentially expressed genes
+
+```{r}
+topgenes = 5
+
+#choose those top genes
+patient1.EMPclus.f.percluster <- lapply(unique(patient1.EMPclus.f$cluster), function(x) patient1.EMPclus.f[patient1.EMPclus.f$cluster==x,])
+names(patient1.EMPclus.f.percluster) <- unique(patient1.EMPclus.f$cluster)
+
+top.logFC.EMPclus <- list()
+highlightgenes.EMPclus <- list()
+for (cl in names(patient1.EMPclus.f.percluster)) {
+  #top avg FC
+  top.logFC.EMPclus[[cl]] <- head(patient1.EMPclus.f.percluster[[cl]][order(patient1.EMPclus.f.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.EMPclus[[cl]] <- data.frame(genes=top.logFC.EMPclus[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.EMPclus <- as.data.frame(data.table::rbindlist(highlightgenes.EMPclus))
+
+patient1.tumor <- ScaleData(patient1.tumor,
+                            features = as.character(highlightgenes.EMPclus$genes),
+                            do.scale = T,
+                            do.center = T,
+                            scale.max = 10,
+                            assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(patient1.tumor, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.EMPclus <- expr.RNAscaledata[as.character(highlightgenes.EMPclus$genes),colnames(expr.RNAscaledata) %in% names(patient1.tumor$tumortype[patient1.tumor$tumortype %in% EMPclus])]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.EMPclus <- c(-max(abs(expr.RNAscaledata.hl.EMPclus)),
+                                         -(mean(unlist(abs(expr.RNAscaledata.hl.EMPclus))[unlist(abs(expr.RNAscaledata.hl.EMPclus))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.EMPclus))[unlist(abs(expr.RNAscaledata.hl.EMPclus))!=0])),
+                                         0,
+                                         mean(unlist(abs(expr.RNAscaledata.hl.EMPclus))[unlist(abs(expr.RNAscaledata.hl.EMPclus))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.EMPclus))[unlist(abs(expr.RNAscaledata.hl.EMPclus))!=0]),
+                                         max(abs(expr.RNAscaledata.hl.EMPclus)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.EMPclus.hm <- Heatmap(expr.RNAscaledata.hl.EMPclus,
+                                           name="scale.data",
+                                           col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.EMPclus, colors = c("red","purple", "black", "yellow","white")),
+                                           show_column_names = F,
+                                           show_row_names = T,
+                                           cluster_columns = T,
+                                           cluster_column_slices = F,
+                                           clustering_method_columns = "ward.D2",
+                                           clustering_distance_columns = "euclidean",
+                                           column_split = factor(patient1.tumor$tumortype[patient1.tumor$tumortype %in% EMPclus],levels=EMPclus),
+                                           row_split = factor(highlightgenes.EMPclus$state, levels = EMPclus),
+                                           cluster_rows = F, 
+                                           row_order = rownames(expr.RNAscaledata.hl.EMPclus),
+                                           row_title_rot = 0,
+                                           column_title_rot = 90,
+                                           #graphic options
+                                           column_dend_height = unit(0.1,"in"),
+                                           row_names_gp = gpar(fontsize=7),
+                                           column_names_gp = gpar(fontsize=11),
+                                           row_title_gp = gpar(fontsize=11),
+                                           column_title_gp = gpar(fontsize=11),
+                                           heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                           border = T,
+                                           use_raster = T,
+                                           raster_device = "CairoPNG",
+                                           raster_quality = 4,
+                                           height = unit(5,"in"),
+                                           width = unit(6,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-diffexpr-SCTccmito-EMPclus-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=20)
+expr.RNAscaledata.hl.EMPclus.hm
+dev.off()
+```
+
+# VeloCyto analysis
+
+Following this tutorial: http://pklab.med.harvard.edu/velocyto/notebooks/R/SCG71.nb.html 
+
+```{r}
+library(velocyto.R)
+#read matrices
+ldat <- read.loom.matrices(paste0(OUTPUT,"velocyto/velocyto-firstSCC.loom"))
+
+emat <- ldat$spliced
+nmat <- ldat$unspliced
+
+#check histograms and distribution
+hist(log10(colSums(emat)),col='wheat',xlab='cell size')
+hist(log10(colSums(nmat)),col='wheat',xlab='cell size')
+
+#only get data from tumor cells
+tumorcells <- names(patient1.tumor$orig.ident)
+colnames(emat) <- paste0(sub("x","",sub("velocyto-firstSCC:","",colnames(emat))),"-1")
+colnames(nmat) <- paste0(sub("x","",sub("velocyto-firstSCC:","",colnames(nmat))),"-1")
+emat.t <- emat[,tumorcells]
+nmat.t <- nmat[,tumorcells]
+
+# take cluster labels and define colors
+cluster.label <- patient1.tumor$tumortype 
+cell.colors <- newtumorcol[match(cluster.label,names(newtumorcol))]
+names(cell.colors) <- names(cluster.label)
+
+# take embedding from umap
+emb <- patient1.tumor@reductions$umap_SCTccmito@cell.embeddings[,1:2]
+
+#take distances from PCA
+cell.dist <- as.dist(1-armaCor(t(patient1.tumor@reductions$pca_SCTccmito@cell.embeddings)))
+
+#filter genes based on the minimum average expression magnitude (in at least one of the clusters), output total number of resulting valid genes
+emat.t.f <- filter.genes.by.cluster.expression(emat.t,cluster.label,min.max.cluster.average = 0.05)
+nmat.t.f <- filter.genes.by.cluster.expression(nmat.t,cluster.label,min.max.cluster.average = 0.02)
+
+#how many genes are left?
+nrow(emat.t.f)
+nrow(nmat.t.f)
+
+#Estimate RNA velocity (using gene-relative model with k=50 cell kNN pooling and using top/bottom 2% quantiles for gamma fit):
+rvel.cd <- gene.relative.velocity.estimates(emat.t.f,
+                                            nmat.t.f,
+                                            deltaT=1,
+                                            kCells=50,
+                                            cell.dist=cell.dist,
+                                            fit.quantile=0.02)
+
+pdf(paste0(OUTPUT,"figs/velocyto_umap_SCT.pdf"),width=5,height=5.5)
+show.velocity.on.embedding.cor(emb,
+                               vel = rvel.cd,
+                               n=200,
+                               scale='sqrt',
+                               cell.colors=cell.colors,
+                               cex=0.5,
+                               arrow.scale=2,
+                               show.grid.flow=TRUE,
+                               min.grid.cell.mass=0.5,
+                               grid.n=50,
+                               arrow.lwd=1,
+                               do.par=F,
+                               cell.border.alpha = 0
+)
+dev.off()
+```
+
+# inferred CNVs
+
+# Extract inferCNV data
+
+```{r}
+OUTPUTINFERCNV <- paste0(OUTPUT,"inferCNV/infercnv/") #here put the infercnv data with all output
+#load infercnv results
+infer_cnvs <- readRDS(paste0(OUTPUTINFERCNV,"run.final.infercnv_obj"))
+
+#all cells
+infercnv.data <- t(infer_cnvs@expr.data)
+# Only use autosomes
+infercnv.data.auto <- infercnv.data[,rownames(infer_cnvs@gene_order)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")]]
+```
+
+# Heatmap of EMP tumor cells with some normal cells
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-filt.RData"))
+
+#get only tumor cells + 500 random normal cells.
+set.seed(42)
+infercnvcells.all <- c(names(patient1.tumor$tumortype),names(sample(patient1.filt$CellType[patient1.filt$CellType!="Tumor"],size = 500,replace = F)))
+
+#rowsplit
+rowcellsanno1.all <- rep("non-malignant",500)
+names(rowcellsanno1.all) <- infercnvcells.all[!infercnvcells.all %in% names(patient1.tumor$tumortype)]
+
+rowcellssplit <- factor(c(as.character(patient1.tumor$tumortype),rowcellsanno1.all),levels = c(levels(patient1.tumor$tumortype),"non-malignant"))
+names(rowcellssplit) <- names(c(patient1.tumor$tumortype,rowcellsanno1.all))
+
+#select only cells that are within tumor (no fibro/mono cells)
+tumor.data.auto.all <- infercnv.data.auto[infercnvcells.all,]
+
+#split by tumortype
+infercnv.tumor.hm.split.all <- Heatmap(tumor.data.auto.all,
+                                   name="log2",
+                                   col = circlize::colorRamp2(breaks = c(min(tumor.data.auto.all),0.85,1,1.15,max(tumor.data.auto.all)),colors = c("darkblue","blue","white","red","darkred")),
+                                   show_column_names = F,
+                                   show_row_names = F,
+                                   #column clustering and split
+                                   column_split = factor(paste0("chr",as.character(infer_cnvs@gene_order$chr)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")]), levels=paste0("chr",c(as.character(1:22),"X","Y"))),
+                                   column_order = rownames(infer_cnvs@gene_order)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")],
+                                   column_title_rot = 90,
+                                   column_title_side = "bottom",
+                                   cluster_columns = F,
+                                   cluster_column_slices = F,
+                                   #row clustering and split
+                                   row_title_rot = 0,
+                                   cluster_rows = T,
+                                   row_split = rowcellssplit,
+                                   cluster_row_slices = F,
+                                   row_dend_reorder = T,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4,
+                                   width = unit(6,"in"),
+                                   height = unit(5,"in"))
+
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-inferCNVauto_hm-tumortype.pdf"), width=20, height=20)
+infercnv.tumor.hm.split.all
+dev.off()
+```
+
+# zoom into specific inferCNV regions that might be artefacts
+
+```{r}
+#chromosome 1 for S100 accumulation
+tumor.data.auto.chr1 <- tumor.data.auto.all[,rownames(infer_cnvs@gene_order[infer_cnvs@gene_order$chr==1,])]
+
+#mark annotation
+S100genes <- columnAnnotation(foo = anno_mark(at = grep("S100",colnames(tumor.data.auto.chr1)),labels = grep("S100",colnames(tumor.data.auto.chr1),value = T),side = "bottom"))
+
+#split by tumortype
+infercnv.tumor.hm.chr1 <- Heatmap(tumor.data.auto.chr1,
+                                   name="log2",
+                                   col = circlize::colorRamp2(breaks = c(min(tumor.data.auto.all),0.85,1,1.15,max(tumor.data.auto.all)),colors = c("darkblue","blue","white","red","darkred")),
+                                   show_column_names = F,
+                                   show_row_names = F,
+                                   #column clustering and split
+                                   column_order = rownames(infer_cnvs@gene_order)[as.character(infer_cnvs@gene_order$chr) %in% c("1")],
+                                   column_title_rot = 90,
+                                   column_title_side = "bottom",
+                                   cluster_columns = F,
+                                   cluster_column_slices = F,
+                                   #row clustering and split
+                                   row_title_rot = 0,
+                                   cluster_rows = T,
+                                   row_split = rowcellssplit,
+                                   cluster_row_slices = F,
+                                   row_dend_reorder = T, 
+                                   bottom_annotation = S100genes,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4,
+                                   width = unit(2.5,"in"),
+                                   height = unit(5,"in"))
+
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-inferCNVauto_hm-tumortype-chr1.pdf"), width=20, height=20)
+infercnv.tumor.hm.chr1
+dev.off()
+
+#chromosome 17 KRT
+tumor.data.auto.chr17 <- tumor.data.auto.all[,rownames(infer_cnvs@gene_order[infer_cnvs@gene_order$chr==17,])]
+
+#mark annotation
+KRTgenes <- columnAnnotation(foo = anno_mark(at = grep("KRT",colnames(tumor.data.auto.chr17)),labels = grep("KRT",colnames(tumor.data.auto.chr17),value = T),side = "bottom"))
+
+#split by tumortype
+infercnv.tumor.hm.chr17 <- Heatmap(tumor.data.auto.chr17,
+                                   name="log2",
+                                   col = circlize::colorRamp2(breaks = c(min(tumor.data.auto),0.85,1,1.15,max(tumor.data.auto)),colors = c("darkblue","blue","white","red","darkred")),
+                                   show_column_names = F,
+                                   show_row_names = F,
+                                   #column clustering and split
+                                   column_order = rownames(infer_cnvs@gene_order)[as.character(infer_cnvs@gene_order$chr) %in% c("17")],
+                                   column_title_rot = 90,
+                                   column_title_side = "bottom",
+                                   cluster_columns = F,
+                                   cluster_column_slices = F,
+                                   #row clustering and split
+                                   row_title_rot = 0,
+                                   cluster_rows = T,
+                                   row_split = rowcellssplit,
+                                   cluster_row_slices = F,
+                                   row_dend_reorder = T, 
+                                   bottom_annotation = KRTgenes,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4,
+                                   width = unit(2.5,"in"),
+                                   height = unit(5,"in"))
+
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-inferCNVauto_hm-tumortype-chr17.pdf"), width=20, height=20)
+infercnv.tumor.hm.chr17
+dev.off()
+```
+
+# Heatmap of EMP tumor cells with some normal cells
+
+```{r}
+#get only tumor cells + 500 random normal cells.
+set.seed(42)
+infercnvcells <- c(names(patient1.tumor$tumortype[patient1.tumor$tumortype %in% c(paste0("pEMT-",1:4),"mix",paste0("epi-",1:4))]),names(sample(patient1.filt$CellType[patient1.filt$CellType!="Tumor"],size = 500,replace = F)))
+
+#rowsplit
+rowcellsanno1 <- rep("non-malignant",500)
+names(rowcellsanno1) <- infercnvcells[!infercnvcells %in% names(patient1.tumor$tumortype[patient1.tumor$tumortype %in% c(paste0("pEMT-",1:4),"mix",paste0("epi-",1:4))])]
+
+#select only cells that are within tumor (no fibro/mono cells)
+tumor.data.auto <- infercnv.data.auto[infercnvcells,]
+
+#split by tumortype
+infercnv.tumor.hm.split <- Heatmap(tumor.data.auto,
+                                   name="log2",
+                                   col = circlize::colorRamp2(breaks = c(min(tumor.data.auto),0.85,1,1.15,max(tumor.data.auto)),colors = c("darkblue","blue","white","red","darkred")),
+                                   show_column_names = F,
+                                   show_row_names = F,
+                                   #column clustering and split
+                                   column_split = factor(paste0("chr",as.character(infer_cnvs@gene_order$chr)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")]), levels=paste0("chr",c(as.character(1:22),"X","Y"))),
+                                   column_order = rownames(infer_cnvs@gene_order)[!as.character(infer_cnvs@gene_order$chr) %in% c("MT")],
+                                   column_title_rot = 90,
+                                   column_title_side = "bottom",
+                                   cluster_columns = F,
+                                   cluster_column_slices = F,
+                                   #row clustering and split
+                                   row_title_rot = 0,
+                                   cluster_rows = T,
+                                   row_split = factor(c(as.character(patient1.tumor$tumortype[patient1.tumor$tumortype %in% c(paste0("pEMT-",1:4),"mix",paste0("epi-",1:4))]),rowcellsanno1),levels = c(c(paste0("pEMT-",1:4),"mix",paste0("epi-",1:4)),"non-malignant")),
+                                   cluster_row_slices = F,
+                                   row_dend_reorder = T,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4,
+                                   width = unit(6,"in"),
+                                   height = unit(4,"in"))
+
+pdf(paste0(OUTPUT,"figs/patient1-tumorfilt-inferCNVauto_hm-EMPclus.pdf"), width=20, height=20)
+infercnv.tumor.hm.split
+dev.off()
+```
+
+# Trajectory analysis
+
+# Run Slingshot
+
+```{r}
+numberofPCs = 20 
+red = "pca_SCTccmito"
+
+clusters <- as.character(patient1.tumor$tumortype)
+names(clusters) <- names(patient1.tumor$tumortype)
+# get embeddings (matrix of cells x PCs and PC values)
+PCAembed <- Embeddings(patient1.tumor, reduction = red)[,1:numberofPCs]
+
+#run slingshot
+pt <- slingshot(PCAembed, clusterLabels = clusters, start.clus = "pEMT-2")
+```
+
+## Plot curves on PCA in multiple dimensions
+
+```{r}
+# plot trajectories in pc space
+ptcrv <- list()
+ptcrv.nona <- list()
+crv.numberofna <- list()
+pt.plotdata <- list()
+pt.pathdata <- list()
+pt.colors <- list()
+ptcrv.dimred <- list()
+for (crv in 1:ncol(slingPseudotime(pt))) {
+  #vector of pseudotime with cellbarcodes as colnames
+  ptcrv[[crv]] <- slingPseudotime(pt)[,crv]
+  #throw out cells with NA
+  ptcrv.nona[[crv]] <- ptcrv[[crv]][!is.na(ptcrv[[crv]])]
+  #count NAs
+  crv.numberofna[[crv]] <- sum(is.na(slingPseudotime(pt)[,crv])) / length(slingPseudotime(pt)[,crv])
+  # Add pseudotime to Seuratobject
+  patient1.tumor[[paste0(red,".crv",crv)]] <- ptcrv[[crv]]
+  
+  #plot curve on PCA plot  
+  pt.plotdata[[crv]] <- as.data.frame(reducedDims(pt)[,1:8])
+  pt.pathdata[[crv]] <- as.data.frame(slingCurves(pt)[[crv]]$s[slingCurves(pt)[[crv]]$ord,1:8])
+  names(pt.plotdata[[crv]]) <- paste0("PC",1:8)
+  names(pt.pathdata[[crv]]) <- paste0("PC",1:8)
+  
+  # # color by cluster
+  pt.colors[[crv]] <- patient1.tumor$tumortype
+  pt.colors[[crv]] <- factor(pt.colors[[crv]], levels= c("NA",levels(patient1.tumor$tumortype)))
+  pt.colors[[crv]][is.na(slingPseudotime(pt)[,crv])] <- "NA"
+
+  ptcrv.dimred[[crv]] <- ggplot() +
+    geom_point(data=pt.plotdata[[crv]],aes(x=PC1,y=PC2, col=pt.colors[[crv]])) +
+    geom_path(data=pt.pathdata[[crv]],aes(x=PC1,y=PC2), col="black", size=1) +
+    scale_color_manual(values = c("NA" = "grey95",colorfunc(levels(patient1.tumor$tumortype)))) +
+    labs(x = "principal component 1", y = "principal component 2", title = paste0(red,"crv",crv)) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-",red,"-crv",crv,".svg"), ptcrv.dimred[[crv]],width = 5,height=5)
+  ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-",red,"-crv",crv,"-noleg.svg"), ptcrv.dimred[[crv]] + theme(legend.position = "none") + labs(title = NULL),width = 5,height=5)
+}
+
+PCAvar.SCTccmito <- patient1.tumor@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(patient1.tumor@assays$SCTccmito@scale.data)[VariableFeatures(patient1.tumor,assay = "SCTccmito"),]))
+
+#combination plot just with EMP curves
+ptcrv.dimred.comb.EMP <- ggplot() + 
+  geom_point(data=pt.plotdata[[1]],aes(x=PC1,y=PC2, col=patient1.tumor$tumortype)) +
+  geom_path(data=pt.pathdata[[1]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[2]],aes(x=PC1,y=PC2), col="blue", size=1) +
+  geom_path(data=pt.pathdata[[6]],aes(x=PC1,y=PC2), col="red", size=1) +
+  scale_color_manual(values = newtumorcol) +
+  labs(x = paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% variance)"), y = paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% variance)"), title = paste0(red,"combined")) +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-EMPclus-",red,"-combined.svg"), ptcrv.dimred.comb.EMP,width = 5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-EMPclus-",red,"-combined-noleg.svg"), ptcrv.dimred.comb.EMP + theme(legend.position = "none") + labs(title = NULL),width = 5,height=4)
+
+ptcrv.dimred.comb.EMP <- ggplot() + 
+  geom_point(data=pt.plotdata[[1]],aes(x=PC1,y=PC2, col=patient1.tumor$tumortype)) +
+  geom_path(data=pt.pathdata[[1]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[2]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[6]],aes(x=PC1,y=PC2), col="black", size=1) +
+  scale_color_manual(values = shadecol) +
+  labs(x = paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% variance)"), y = paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% variance)"), title = paste0(red,"combined")) +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-EMPclus-",red,"-combined-black.svg"), ptcrv.dimred.comb.EMP,width = 5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-EMPclus-",red,"-combined-black-noleg.svg"), ptcrv.dimred.comb.EMP + theme(legend.position = "none") + labs(title = NULL),width = 5,height=4)
+
+#combination plot with all curves
+ptcrv.dimred.comb <- ggplot() + 
+  geom_point(data=pt.plotdata[[1]],aes(x=PC1,y=PC2, col=patient1.tumor$tumortype)) +
+  geom_path(data=pt.pathdata[[1]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[2]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[3]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[4]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[5]],aes(x=PC1,y=PC2), col="black", size=1) +
+  geom_path(data=pt.pathdata[[6]],aes(x=PC1,y=PC2), col="black", size=1) +
+  scale_color_manual(values = newtumorcol) +
+  labs(x = paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% variance)"), y = paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% variance)"), title = paste0(red,"combined")) +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-",red,"-combined.svg"), ptcrv.dimred.comb,width = 5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-pt-tumortype-",red,"-combined-noleg.svg"), ptcrv.dimred.comb + theme(legend.position = "none") + labs(title = NULL),width = 5,height=4)
+
+ptcrv.dimred.comb.EMP
+ptcrv.dimred.comb
+crv.numberofna
+```
+
+# Visualize expression of selected genes across EMP trajectory
+
+```{r}
+pseudotimeexpression <- function(SeuratObject,clusters,gene=NULL,crv) {
+  expr <- GetAssayData(SeuratObject,assay = "RNA",slot = "data")[gene,]
+  
+  plotdata <- data.frame(cluster=SeuratObject[[clusters]][,1],
+                         gene=expr,
+                         pt=SeuratObject[[paste0(red,".crv",crv)]][,1])
+  ggplot(data=plotdata,
+         aes(x=pt,y=gene, col=cluster)) +
+    geom_point() +
+    geom_smooth(method="gam", col="red", formula = y ~ s(x, bs = "cs")) +
+    scale_color_manual(values = newtumorcol) +
+    scale_x_continuous(breaks = seq(0,200,10)) +
+    labs(x=paste0("curve ",crv),y=ifelse(is.null(gene),score,gene)) +
+    ggtitle(gene) +
+    theme_jb()
+}
+
+EMPgenes <- c("VIM","MMP1","SPRR1B","KLK7")
+
+pseudotimeexpression(patient1.tumor,"tumortype",gene="MMP1",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,])))
+pseudotimeexpression(patient1.tumor,"tumortype",gene="VIM",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,])))
+pseudotimeexpression(patient1.tumor,"tumortype",gene="SPRR1B",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,])))
+pseudotimeexpression(patient1.tumor,"tumortype",gene="KLK7",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,])))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-",red,"-ptexpr-crv2-MMP1.svg"), pseudotimeexpression(patient1.tumor,"tumortype",gene="MMP1",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,]))) + theme(legend.position = "none") + ggtitle(NULL),width = 2.5,height=2.5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-",red,"-ptexpr-crv2-VIM.svg"), pseudotimeexpression(patient1.tumor,"tumortype",gene="VIM",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,]))) + theme(legend.position = "none") + ggtitle(NULL),width = 2.5,height=2.5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-",red,"-ptexpr-crv2-SPRR1B.svg"), pseudotimeexpression(patient1.tumor,"tumortype",gene="SPRR1B",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,]))) + theme(legend.position = "none") + ggtitle(NULL),width = 2.5,height=2.5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumorfilt-",red,"-ptexpr-crv2-KLK7.svg"), pseudotimeexpression(patient1.tumor,"tumortype",gene="KLK7",2) + coord_cartesian(ylim = c(0,max(GetAssayData(patient1.tumor,assay = "RNA",slot = "data")[EMPgenes,]))) + theme(legend.position = "none") + ggtitle(NULL),width = 2.5,height=2.5)
+```
+
+# Save
+
+```{r}
+#sessioninfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient1-tumorfilt-EMPanalysis-sessionInfo.txt"))
+```

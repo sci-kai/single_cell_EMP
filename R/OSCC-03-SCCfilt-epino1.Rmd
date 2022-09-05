@@ -1,0 +1,594 @@
+---
+title: "epino1thelial"
+author: "Kai"
+date: "2nd July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+# Load Seurat object
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt.RData"))
+```
+
+# Subset cells and evaluate subsetting
+
+```{r}
+SCC.epino1 <- subset(SCC,cells = names(SCC$CellType_SCTccmito_harmony)[SCC$CellType_SCTccmito_harmony=="Tumor" & SCC$patient!="1"])
+
+DefaultAssay(SCC.epino1) <- "RNA"
+SCC.epino1@assays$SCT <- NULL
+SCC.epino1@assays$SCTccmito <- NULL
+for (x in names(SCC.epino1@reductions)) {SCC.epino1@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(SCC.epino1) <- "RNA"
+#log-normalization for slot "data"
+SCC.epino1 <- NormalizeData(SCC.epino1, 
+                            normalization.method = "LogNormalize", #default
+                            scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                            assay = "RNA",
+                            margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+SCC.epino1 <- FindVariableFeatures(SCC.epino1, 
+                                   assay = "RNA",
+                                   selection.method = "vst", #default
+                                   nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+SCC.epino1 <- ScaleData(SCC.epino1,
+                        features = rownames(SCC.epino1),
+                        do.scale = T,
+                        do.center = T,
+                        scale.max = 10,
+                        assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+SCC.epino1 <- CellCycleScoring(SCC.epino1,
+                               s.features = cc.genes.updated.2019$s.genes,
+                               g2m.features = cc.genes.updated.2019$g2m.genes, 
+                               assay="RNA")
+```
+
+# Regression of cell cycle and mitochondrial percentage
+
+## Normalization with SCTransform
+
+```{r SCC.epino1_normalization}
+SCC.epino1 <- SCTransform(SCC.epino1, 
+                          ncells = ncol(SCC.epino1),
+                          assay="RNA", #default
+                          new.assay.name = "SCTccmito", #default; overwrites old SCT
+                          do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                          variable.features.n = 3000, #default set variable features
+                          vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                          do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                          do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                          return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                          seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+```{r}
+SCC.epino1 <- RunPCA(SCC.epino1, 
+                     npcs = 50,  #number of PCs to use
+                     assay = "SCTccmito",
+                     rev.pca = F, # default, Run cell x gene matrix
+                     weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                     approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                     features = VariableFeatures(SCC.epino1,assay = "SCTccmito"), #default
+                     reduction.name = "pca_SCTccmito",
+                     verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- SCC.epino1@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC.epino1@assays$SCTccmito@scale.data)[VariableFeatures(SCC.epino1,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(SCC.epino1, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "patient") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+PCAplot.SCTccmito
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(SCC.epino1) <- "SCTccmito"
+#based on harmony
+SCC.epino1 <- FindNeighbors(SCC.epino1,
+                            dims = 1:numberofPCs,
+                            reduction = "pca_SCTccmito",
+                            assay = "SCTccmito")
+SCC.epino1 <- FindClusters(SCC.epino1,
+                           resolution = 2,
+                           random.seed=100)
+
+SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA <- SCC.epino1$seurat_clusters
+SCC.epino1$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP}
+SCC.epino1 <- RunUMAP(SCC.epino1,
+                      dims = 1:numberofPCs,
+                      assay = "SCTccmito",
+                      umap.method = "uwot", # Seurat default
+                      graph=NULL, #default
+                      reduction="pca_SCTccmito",
+                      reduction.name = "umap_SCTccmito",
+                      reduction.key = "umap_SCTccmito"
+)
+```
+
+```{r}
+UMAP.SCTccmito.clusPCA <- DimPlot(SCC.epino1, 
+                                  reduction = "umap_SCTccmito", 
+                                  pt.size = 1, 
+                                  label = T, 
+                                  group.by = "seurat_clusters_epino1_SCTccmito_PCA") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.celltype.ss <- DimPlot(SCC.epino1, 
+                                      reduction = "umap_SCTccmito", 
+                                      pt.size = 1, 
+                                      label = F, 
+                                      group.by = "CellType_ss") +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.sample <- DimPlot(SCC.epino1, 
+                                 reduction = "umap_SCTccmito", 
+                                 pt.size = 1, 
+                                 label = F, 
+                                 group.by = "sample") +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.patients <- DimPlot(SCC.epino1, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 1, 
+                                   label = F, 
+                                   group.by = "patient") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.hashID <- DimPlot(SCC.epino1, 
+                                 reduction = "umap_SCTccmito", 
+                                 pt.size = 1, 
+                                 label = F, 
+                                 group.by = "hash.ID") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.Lok <- DimPlot(SCC.epino1, 
+                              reduction = "umap_SCTccmito", 
+                              pt.size = 1, 
+                              label = F, 
+                              group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.tech <- DimPlot(SCC.epino1, 
+                               reduction = "umap_SCTccmito", 
+                               pt.size = 1, 
+                               label = F, 
+                               group.by = "technology") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.lib <- DimPlot(SCC.epino1, 
+                              reduction = "umap_SCTccmito", 
+                              pt.size = 1, 
+                              label = F, 
+                              group.by = "lib") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.Phase <- DimPlot(SCC.epino1, 
+                                reduction = "umap_SCTccmito", 
+                                pt.size = 1, 
+                                label = F, 
+                                group.by = "Phase") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+
+UMAP.SCTccmito.QC <- FeaturePlot(SCC.epino1, 
+                                 features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                 reduction = "umap_SCTccmito", 
+                                 cols = c("grey95", "blue"),
+                                 pt.size = 1,
+                                 ncol = 2,
+                                 order = T,
+                                 slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-clusPCA.svg"),UMAP.SCTccmito.clusPCA,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-CellType-ss.svg"),UMAP.SCTccmito.celltype.ss,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-CellType-ss-noleg.svg"),UMAP.SCTccmito.celltype.ss + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-sample.svg"),UMAP.SCTccmito.sample,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-sample-noleg.svg"),UMAP.SCTccmito.sample + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-patients.svg"),UMAP.SCTccmito.patients,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-patients-noleg.svg"),UMAP.SCTccmito.patients + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-hashID.svg"),UMAP.SCTccmito.hashID,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-hashID-noleg.svg"),UMAP.SCTccmito.hashID + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-Lok.svg"),UMAP.SCTccmito.Lok,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-Lok-noleg.svg"),UMAP.SCTccmito.Lok + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-technology.svg"),UMAP.SCTccmito.tech,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-technology-noleg.svg"),UMAP.SCTccmito.tech + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-lib.svg"),UMAP.SCTccmito.lib,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-lib-noleg.svg"),UMAP.SCTccmito.lib + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-Phase.svg"),UMAP.SCTccmito.Phase,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-Phase-noleg.svg"),UMAP.SCTccmito.Phase + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-QC.svg"),UMAP.SCTccmito.QC, width=10, height=15)
+
+UMAP.SCTccmito.clusPCA
+UMAP.SCTccmito.celltype.ss
+UMAP.SCTccmito.sample
+UMAP.SCTccmito.patients
+UMAP.SCTccmito.hashID
+UMAP.SCTccmito.Lok
+UMAP.SCTccmito.tech
+UMAP.SCTccmito.lib
+UMAP.SCTccmito.Phase
+UMAP.SCTccmito.QC
+```
+
+# Harmony batch correction
+
+```{r}
+library(harmony)
+set.seed(42)
+SCC.epino1 <- RunHarmony(SCC.epino1,
+                         reduction="pca_SCTccmito",
+                         group.by.vars = "patient",
+                         reduction.save = "harmony_SCTccmito",
+                         plot_convergence = T,
+                         max.iter.harmony = 30,
+                         assay.use = "SCTccmito",
+                         project.dim = F)
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(SCC.epino1) <- "SCTccmito"
+#based on harmony
+SCC.epino1 <- FindNeighbors(SCC.epino1,
+                            dims = 1:numberofPCs,
+                            reduction = "harmony_SCTccmito",
+                            assay = "SCTccmito")
+SCC.epino1 <- FindClusters(SCC.epino1,
+                           resolution = 0.8,
+                           random.seed=100)
+
+SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA_harmony <- SCC.epino1$seurat_clusters
+SCC.epino1$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP}
+SCC.epino1 <- RunUMAP(SCC.epino1,
+                      dims = 1:numberofPCs,
+                      assay = "SCTccmito",
+                      umap.method = "uwot", # Seurat default
+                      graph=NULL, #default
+                      reduction="harmony_SCTccmito",
+                      reduction.name = "humap_SCTccmito",
+                      reduction.key = "humap_SCTccmito"
+)
+```
+
+```{r}
+UMAPharmony.SCTccmito.clusPCA <- DimPlot(SCC.epino1, 
+                                         reduction = "humap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = T, 
+                                         group.by = "seurat_clusters_epino1_SCTccmito_PCA_harmony") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.celltype.ss <- DimPlot(SCC.epino1, 
+                                             reduction = "humap_SCTccmito", 
+                                             pt.size = 1, 
+                                             label = F, 
+                                             group.by = "CellType_ss") +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.sample <- DimPlot(SCC.epino1, 
+                                        reduction = "humap_SCTccmito", 
+                                        pt.size = 1, 
+                                        label = F, 
+                                        group.by = "sample") +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.patients <- DimPlot(SCC.epino1, 
+                                          reduction = "humap_SCTccmito", 
+                                          pt.size = 1, 
+                                          label = F, 
+                                          group.by = "patient") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAPharmony.SCTccmito.hashID <- DimPlot(SCC.epino1, 
+                                        reduction = "humap_SCTccmito", 
+                                        pt.size = 1, 
+                                        label = F, 
+                                        group.by = "hash.ID") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAPharmony.SCTccmito.Lok <- DimPlot(SCC.epino1, 
+                                     reduction = "humap_SCTccmito", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAPharmony.SCTccmito.tech <- DimPlot(SCC.epino1, 
+                                      reduction = "humap_SCTccmito", 
+                                      pt.size = 1, 
+                                      label = F, 
+                                      group.by = "technology") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.lib <- DimPlot(SCC.epino1, 
+                                     reduction = "humap_SCTccmito", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "lib") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.Phase <- DimPlot(SCC.epino1, 
+                                       reduction = "humap_SCTccmito", 
+                                       pt.size = 1, 
+                                       label = F, 
+                                       group.by = "Phase") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+
+UMAPharmony.SCTccmito.QC <- FeaturePlot(SCC.epino1, 
+                                        features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                        reduction = "humap_SCTccmito", 
+                                        cols = c("grey95", "blue"),
+                                        pt.size = 1,
+                                        ncol = 2,
+                                        order = T,
+                                        slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-clusPCA.svg"),UMAPharmony.SCTccmito.clusPCA,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-clusPCA-noleg.svg"),UMAPharmony.SCTccmito.clusPCA + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-CellType-ss.svg"),UMAPharmony.SCTccmito.celltype.ss,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-CellType-ss-noleg.svg"),UMAPharmony.SCTccmito.celltype.ss + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-sample.svg"),UMAPharmony.SCTccmito.sample,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-sample-noleg.svg"),UMAPharmony.SCTccmito.sample + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-patients.svg"),UMAPharmony.SCTccmito.patients,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-patients-noleg.svg"),UMAPharmony.SCTccmito.patients + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-hashID.svg"),UMAPharmony.SCTccmito.hashID,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-hashID-noleg.svg"),UMAPharmony.SCTccmito.hashID + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-Lok.svg"),UMAPharmony.SCTccmito.Lok,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-Lok-noleg.svg"),UMAPharmony.SCTccmito.Lok + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-technology.svg"),UMAPharmony.SCTccmito.tech,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-technology-noleg.svg"),UMAPharmony.SCTccmito.tech + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-lib.svg"),UMAPharmony.SCTccmito.lib,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-lib-noleg.svg"),UMAPharmony.SCTccmito.lib + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-Phase.svg"),UMAPharmony.SCTccmito.Phase,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-Phase-noleg.svg"),UMAPharmony.SCTccmito.Phase + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-QC.svg"),UMAPharmony.SCTccmito.QC, width=10, height=15)
+
+UMAPharmony.SCTccmito.clusPCA
+UMAPharmony.SCTccmito.celltype.ss
+UMAPharmony.SCTccmito.sample
+UMAPharmony.SCTccmito.patients
+UMAPharmony.SCTccmito.hashID
+UMAPharmony.SCTccmito.Lok
+UMAPharmony.SCTccmito.tech
+UMAPharmony.SCTccmito.lib
+UMAPharmony.SCTccmito.Phase
+UMAPharmony.SCTccmito.QC
+```
+
+#Remove non-epithelial from subset
+
+possibly these represent doublets or misclustered cells
+
+## Marker Gene Expression
+
+```{r}
+UMAPharmony.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(SCC.epino1,celltypemarkers[[x]],reduction = "humap_SCTccmito"))
+names(UMAPharmony.SCTccmito.marker) <- names(celltypemarkers)
+
+UMAP.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(SCC.epino1,celltypemarkers[[x]],reduction = "umap_SCTccmito"))
+names(UMAP.SCTccmito.marker) <- names(celltypemarkers)
+
+lapply(names(UMAPharmony.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-marker-",x,".png"),UMAPharmony.SCTccmito.marker[[x]],dpi=300, width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+lapply(names(UMAP.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-marker-",x,".png"),UMAP.SCTccmito.marker[[x]],dpi=300, width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+
+UMAPharmony.SCTccmito.marker
+```
+
+# Differential expression
+
+```{r}
+# Set the Idents to the clustering or splitting of cells for which you want to perform DGE
+Idents(SCC.epino1) <- SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA_harmony
+
+SCC.epino1.clusharmonymarker <- calculate_foldchanges(SCC.epino1,SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA_harmony)
+SCC.epino1.clusmarker<- calculate_foldchanges(SCC.epino1,SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA)
+
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.epino1.clusharmonymarker <- SCC.epino1.clusharmonymarker[(SCC.epino1.clusharmonymarker$pct.1 > 0.1 | SCC.epino1.clusharmonymarker$pct.2 > 0.1) & abs(SCC.epino1.clusharmonymarker$avg_log2FC)>0.25,]
+SCC.epino1.clusmarker <- SCC.epino1.clusmarker[(SCC.epino1.clusmarker$pct.1 > 0.1 | SCC.epino1.clusmarker$pct.2 > 0.1) & abs(SCC.epino1.clusmarker$avg_log2FC)>0.25,]
+```
+
+## Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_hmarker = function(x) {
+  c(sort(SCC.epino1.clusharmonymarker[SCC.epino1.clusharmonymarker$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_hmarker = function(x) {
+  c(sort(SCC.epino1.clusharmonymarker[SCC.epino1.clusharmonymarker$cluster==x,]$pct.1 - SCC.epino1.clusharmonymarker[SCC.epino1.clusharmonymarker$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.epino1.clusharmonymarker.volpct <- lapply(levels(SCC.epino1.clusharmonymarker$cluster), function(x) ggvolcano(SCC.epino1.clusharmonymarker[SCC.epino1.clusharmonymarker$cluster==x,],logFCcutoff_hmarker(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.epino1.clusharmonymarker.volpct) <- levels(SCC.epino1.clusharmonymarker$cluster)
+
+SCC.epino1.clusharmonymarker.volpctdiff <- lapply(levels(SCC.epino1.clusharmonymarker$cluster), function(x) ggvolcano(SCC.epino1.clusharmonymarker[SCC.epino1.clusharmonymarker$cluster==x,],pctdiffcutoff_hmarker(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.epino1.clusharmonymarker.volpctdiff) <- levels(SCC.epino1.clusharmonymarker$cluster)
+
+#save volcano plots
+for (i in names(SCC.epino1.clusharmonymarker.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-diffexpr-SCTccmito-clusharmony-volcanopct-",i,".svg"),SCC.epino1.clusharmonymarker.volpct[[i]], width = 5,height = 5)
+}
+for (i in names(SCC.epino1.clusharmonymarker.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-diffexpr-SCTccmito-clusharmony-volcanopctdiff-",i,".svg"),SCC.epino1.clusharmonymarker.volpctdiff[[i]],width = 5,height = 5)
+}
+
+SCC.epino1.clusharmonymarker.volpct
+```
+```{r}
+SCC.epino1.clusharmonymarker.volpctdiff
+```
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_marker = function(x) {
+  c(sort(SCC.epino1.clusmarker[SCC.epino1.clusmarker$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_marker = function(x) {
+  c(sort(SCC.epino1.clusmarker[SCC.epino1.clusmarker$cluster==x,]$pct.1 - SCC.epino1.clusmarker[SCC.epino1.clusmarker$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.epino1.clusmarker.volpct <- lapply(levels(SCC.epino1.clusmarker$cluster), function(x) ggvolcano(SCC.epino1.clusmarker[SCC.epino1.clusmarker$cluster==x,],logFCcutoff_marker(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.epino1.clusmarker.volpct) <- levels(SCC.epino1.clusmarker$cluster)
+
+SCC.epino1.clusmarker.volpctdiff <- lapply(levels(SCC.epino1.clusmarker$cluster), function(x) ggvolcano(SCC.epino1.clusmarker[SCC.epino1.clusmarker$cluster==x,],pctdiffcutoff_marker(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.epino1.clusmarker.volpctdiff) <- levels(SCC.epino1.clusmarker$cluster)
+
+#save volcano plots
+for (i in names(SCC.epino1.clusmarker.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-diffexpr-SCTccmito-clus-volcanopct-",i,".svg"),SCC.epino1.clusmarker.volpct[[i]],width = 5,height = 5)
+}
+for (i in names(SCC.epino1.clusmarker.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-diffexpr-SCTccmito-clus-volcanopctdiff-",i,".svg"),SCC.epino1.clusmarker.volpctdiff[[i]],width = 5,height = 5)
+}
+
+SCC.epino1.clusmarker.volpct
+```
+
+# Relabel different cell types
+
+```{r}
+SCC.epino1$CellType_epino1_SCTccmito_harmony <- as.character(SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA)
+SCC.epino1$CellType_epino1_SCTccmito_harmony[SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA=="1"] <- "T-Cells"
+SCC.epino1$CellType_epino1_SCTccmito_harmony[SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA=="9"] <- "T-Cells"
+SCC.epino1$CellType_epino1_SCTccmito_harmony[SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA=="13"] <- "Mast cells"
+SCC.epino1$CellType_epino1_SCTccmito_harmony[SCC.epino1$seurat_clusters_epino1_SCTccmito_PCA=="10"] <- "Immune cells"
+SCC.epino1$CellType_epino1_SCTccmito_harmony[!SCC.epino1$CellType_epino1_SCTccmito_harmony %in% c("T-Cells","Mast cells","Immune cells")] <- "epithelial"
+
+#Myofibroblasts
+SCC.epino1$CellType_epino1_SCTccmito_harmony[colSums(SCC.epino1@assays$RNA@counts[c("ACTA2","ACTG2"),]>0)>0] <- "myofibroblasts"
+
+UMAP.SCTccmito.celltypeepino1 <- DimPlot(SCC.epino1, 
+                                         reduction = "umap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = F, 
+                                         group.by = "CellType_epino1_SCTccmito_harmony") +
+  theme_jb_nogrid()
+UMAPharmony.SCTccmito.celltypeepino1 <- DimPlot(SCC.epino1, 
+                                             reduction = "humap_SCTccmito", 
+                                             pt.size = 1, 
+                                             label = F, 
+                                             group.by = "CellType_epino1_SCTccmito_harmony") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-CellTypeepino1.svg"),UMAPharmony.SCTccmito.celltypeepino1, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAPharmony-CellTypeepino1-noleg.svg"),UMAPharmony.SCTccmito.celltypeepino1 + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-CellTypeepino1.svg"),UMAP.SCTccmito.celltypeepino1, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-epino1-SCTccmito-UMAP-CellTypeepino1-noleg.svg"),UMAP.SCTccmito.celltypeepino1 + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+UMAP.SCTccmito.celltypeepino1
+UMAPharmony.SCTccmito.celltypeepino1
+```
+
+#Save
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfilt-epino1.RData"),SCC.epino1)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfilt-epino1-sessionInfo.txt"))
+```

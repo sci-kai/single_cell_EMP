@@ -1,0 +1,351 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "10th May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/HPVneg_CD45n_analysis/"
+```
+
+# Load Seurat object
+
+```{r}
+load(paste0(OUTPUT,"RData/HNSCC-epi.RData"))
+```
+
+# Subset cells and evaluate subsetting
+
+```{r}
+HNSCC.e.temp <- HNSCC.e
+HNSCC.e <- subset(HNSCC.e.temp,cells = names(HNSCC.e.temp$CellType_epi_SCTccmito)[HNSCC.e.temp$CellType_epi_SCTccmito=="Epithelial"])
+
+DefaultAssay(HNSCC.e) <- "RNA"
+HNSCC.e@assays$SCT <- NULL
+HNSCC.e@assays$SCTccmito <- NULL
+for (x in names(HNSCC.e@reductions)) {HNSCC.e@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(HNSCC.e) <- "RNA"
+#log-normalization for slot "data"
+HNSCC.e <- NormalizeData(HNSCC.e, 
+                         normalization.method = "LogNormalize", #default
+                         scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                         assay = "RNA",
+                         margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+HNSCC.e <- FindVariableFeatures(HNSCC.e, 
+                                assay = "RNA",
+                                selection.method = "vst", #default
+                                nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+HNSCC.e <- ScaleData(HNSCC.e,
+                     features = VariableFeatures(HNSCC.e,assay = "RNA"),
+                     do.scale = T,
+                     do.center = T,
+                     scale.max = 10,
+                     assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+HNSCC.e <- CellCycleScoring(HNSCC.e,
+                            s.features = cc.genes.updated.2019$s.genes,
+                            g2m.features = cc.genes.updated.2019$g2m.genes, 
+                            assay="RNA")
+```
+
+# Regression of cell cycle and mitochondrial percentage
+
+## Normalization with SCTransform
+
+```{r HNSCC.e_normalization}
+HNSCC.e <- SCTransform(HNSCC.e, 
+                       ncells = ncol(HNSCC.e),
+                       assay="RNA", #default
+                       new.assay.name = "SCTccmito", #default; overwrites old SCT
+                       do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                       variable.features.n = 3000, #default set variable features
+                       vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                       do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                       do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                       return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                       seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+```{r}
+HNSCC.e <- RunPCA(HNSCC.e, 
+                  npcs = 50,  #number of PCs to use
+                  assay = "SCTccmito",
+                  rev.pca = F, # default, Run cell x gene matrix
+                  weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                  approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                  features = VariableFeatures(HNSCC.e,assay = "SCTccmito"), #default
+                  reduction.name = "pca_SCTccmito",
+                  verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- HNSCC.e@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(HNSCC.e@assays$SCTccmito@scale.data)[VariableFeatures(HNSCC.e,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(HNSCC.e, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "patients") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+PCAplot.SCTccmito
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(HNSCC.e) <- "SCTccmito"
+#based on harmony
+HNSCC.e <- FindNeighbors(HNSCC.e,
+                         dims = 1:numberofPCs,
+                         reduction = "pca_SCTccmito",
+                         assay = "SCTccmito")
+HNSCC.e <- FindClusters(HNSCC.e,
+                        resolution = 0.8,
+                        random.seed=100)
+
+HNSCC.e$seurat_clusters_epifilt_SCTccmito_PCA <- HNSCC.e$seurat_clusters
+HNSCC.e$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP}
+HNSCC.e <- RunUMAP(HNSCC.e,
+                   dims = 1:numberofPCs,
+                   assay = "SCTccmito",
+                   umap.method = "uwot", # Seurat default
+                   graph=NULL, #default
+                   reduction="pca_SCTccmito",
+                   reduction.name = "umap_SCTccmito",
+                   reduction.key = "umap_SCTccmito"
+)
+```
+
+```{r}
+UMAP.SCTccmito.clusPCA <- DimPlot(HNSCC.e, 
+                                  reduction = "umap_SCTccmito", 
+                                  pt.size = 1, 
+                                  label = T, 
+                                  group.by = "seurat_clusters_epifilt_SCTccmito_PCA") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.patients <- DimPlot(HNSCC.e, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 1, 
+                                   label = F, 
+                                   group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.Phase <- DimPlot(HNSCC.e, 
+                                reduction = "umap_SCTccmito", 
+                                pt.size = 1, 
+                                label = F, 
+                                group.by = "Phase") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.infstatus <- DimPlot(HNSCC.e, 
+                                    reduction = "umap_SCTccmito", 
+                                    pt.size = 1, 
+                                    label = F, 
+                                    group.by = "Inflammation.status") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.QC <- FeaturePlot(HNSCC.e, 
+                                 features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                 reduction = "umap_SCTccmito", 
+                                 cols = c("grey95", "blue"),
+                                 pt.size = 1,
+                                 ncol = 2,
+                                 order = T,
+                                 slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-patients.svg"),UMAP.SCTccmito.patients,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-patients-noleg.svg"),UMAP.SCTccmito.patients + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-Phase.svg"),UMAP.SCTccmito.Phase,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-Phase-noleg.svg"),UMAP.SCTccmito.Phase + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-QC.svg"),UMAP.SCTccmito.QC, width=10, height=15)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-infstatus.svg"),UMAP.SCTccmito.infstatus,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAP-infstatus-noleg.svg"),UMAP.SCTccmito.infstatus + theme(legend.position = "none"),width=5,height=5)
+
+UMAP.SCTccmito.clusPCA
+UMAP.SCTccmito.patients
+UMAP.SCTccmito.Phase
+UMAP.SCTccmito.QC
+UMAP.SCTccmito.infstatus
+```
+
+# Harmony batch correction
+
+```{r}
+library(harmony)
+set.seed(42)
+HNSCC.e <- RunHarmony(HNSCC.e,
+                      reduction="pca_SCTccmito",
+                      group.by.vars = "patients",
+                      reduction.save = "harmony_SCTccmito",
+                      plot_convergence = T,
+                      max.iter.harmony = 30,
+                      assay.use = "SCTccmito",
+                      project.dim = F)
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+DefaultAssay(HNSCC.e) <- "SCTccmito"
+#based on harmony
+HNSCC.e <- FindNeighbors(HNSCC.e,
+                         dims = 1:numberofPCs,
+                         reduction = "harmony_SCTccmito",
+                         assay = "SCTccmito")
+HNSCC.e <- FindClusters(HNSCC.e,
+                        resolution = 0.8,
+                        random.seed=100)
+
+HNSCC.e$seurat_clusters_epifilt_SCTccmito_PCA_harmony <- HNSCC.e$seurat_clusters
+HNSCC.e$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP}
+HNSCC.e <- RunUMAP(HNSCC.e,
+                   dims = 1:numberofPCs,
+                   assay = "SCTccmito",
+                   umap.method = "uwot", # Seurat default
+                   graph=NULL, #default
+                   reduction="harmony_SCTccmito",
+                   reduction.name = "humap_SCTccmito",
+                   reduction.key = "humap_SCTccmito"
+)
+```
+
+```{r}
+UMAPharmony.SCTccmito.clusPCA <- DimPlot(HNSCC.e, 
+                                         reduction = "humap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = T, 
+                                         group.by = "seurat_clusters_epifilt_SCTccmito_PCA_harmony") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.patients <- DimPlot(HNSCC.e, 
+                                          reduction = "humap_SCTccmito", 
+                                          pt.size = 1, 
+                                          label = F, 
+                                          group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAPharmony.SCTccmito.Phase <- DimPlot(HNSCC.e, 
+                                       reduction = "humap_SCTccmito", 
+                                       pt.size = 1, 
+                                       label = F, 
+                                       group.by = "Phase") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+UMAPharmony.SCTccmito.infstatus <- DimPlot(HNSCC.e, 
+                                           reduction = "humap_SCTccmito", 
+                                           pt.size = 1, 
+                                           label = F, 
+                                           group.by = "Inflammation.status") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.QC <- FeaturePlot(HNSCC.e, 
+                                        features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                        reduction = "humap_SCTccmito", 
+                                        cols = c("grey95", "blue"),
+                                        pt.size = 1,
+                                        ncol = 2,
+                                        order = T,
+                                        slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-clusPCA-noleg.svg"),UMAPharmony.SCTccmito.clusPCA + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-patients.svg"),UMAPharmony.SCTccmito.patients,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-patients-noleg.svg"),UMAPharmony.SCTccmito.patients + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-Phase.svg"),UMAPharmony.SCTccmito.Phase,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-Phase-noleg.svg"),UMAPharmony.SCTccmito.Phase + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-QC.svg"),UMAPharmony.SCTccmito.QC, width=10, height=15)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-infstatus.svg"),UMAPharmony.SCTccmito.infstatus,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-epifilt-SCTccmito-UMAPharmony-infstatus-noleg.svg"),UMAPharmony.SCTccmito.infstatus + theme(legend.position = "none"),width=5,height=5)
+
+UMAPharmony.SCTccmito.clusPCA
+UMAPharmony.SCTccmito.patients
+UMAPharmony.SCTccmito.Phase
+UMAPharmony.SCTccmito.QC
+UMAPharmony.SCTccmito.infstatus
+```
+
+#Save
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/HNSCC-epifilt.RData"),HNSCC.e)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/HNSCC-epifilt-sessionInfo.txt"))
+```

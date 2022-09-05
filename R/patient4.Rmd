@@ -1,0 +1,940 @@
+---
+title: "patient4"
+author: "Kai"
+date: "6th April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(Seurat)
+library(ggplot2)
+
+#load functions
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+#set output
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient4/"
+```
+
+# Load files
+
+```{r}
+data_dir = "~/tscr/Allgemeine Daten/10x Genomics/data/PEI03_A006850046_MCC-SCC/cellranger/SID114992/outs/"
+
+#raw data containing gene expression and Hashtag matrices
+patient4.data <- Read10X(paste0(data_dir,"raw_feature_bc_matrix/"))
+#Setup Seurat object for gene Expression
+patient4 <- CreateSeuratObject(patient4.data$`Gene Expression`, project = "patient4")
+#Adding HTO data as an independent assay
+patient4[["HTO"]] <- CreateAssayObject(counts = patient4.data$`Antibody Capture`)
+#remove raw data input
+rm(patient4.data)
+```
+
+# Quality control and Filtering
+
+## Assign the expression of mitochondrial and housekeeping genes
+
+houskeeping genes are e.g. ribosomal proteins, expressed in nearly every cell and less sensitive to high dropout.
+
+```{r}
+# relative expression of mitochondrial gene as metric for damaged cells
+patient4[["percent.mito"]] <- PercentageFeatureSet(patient4, pattern = "^MT-") 
+
+#read in names of housekeeper genes
+hkgenes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1) 
+# remove hkgenes that were not found (maybe not in the reference or got lost)
+hkgenes.found <- which(toupper(rownames(patient4)) %in% toupper(hkgenes))
+# sum of hk genes for each cell
+hk_per_cell <- Matrix::colSums(GetAssayData(patient4)[hkgenes.found, ] > 0)
+patient4 <- AddMetaData(object = patient4, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+rm(hk_per_cell,hkgenes.found)
+```
+
+## Quality Control Plots
+
+Than we have four metrices to identify barcodes containing live and usable cells:
+* UMI counts (nCount)
+* Gene counts (nFeature)
+* Mitochondrial gene expression: % of UMIs in mitochondrial genes relative to all genes
+* Housekeeper genes: Number of housekeeping genes (97 in total) that have at least 1 UMI count in a cell (no percentage)
+
+It is not helpful to look at all metrics independently since they correlating a lot with each other. So first, the correlations between the metrices are investigated.
+
+### Filter quality metric dataframe for definitely empty barcodes to get readable histograms
+
+First, we create a helping dataframe and filter out cells that are definitely empty barcodes since they have only very few UMI Counts. 
+These are normally around 70-90% of all barcodes. Removing those will give us more informative histograms (Otherwise there will always be a very high peak at around zero). 
+To examine distribution over all barcodes, we do a cumulative plot showing the % of cells with less than a certain amount of counts.
+
+```{r cumplot}
+#create summary data frame
+barcode_metrics <- data.frame(barcodes = names(patient4$nCount_RNA),
+                              nCount = patient4$nCount_RNA,
+                              nFeature = patient4$nFeature_RNA,
+                              percent.mito = patient4$percent.mito,
+                              n.exp.hkgenes = patient4$n.exp.hkgenes)
+
+cumplotdata <- data.frame(x=1:1000, y= unlist(lapply(1:1000,function(x) sum(patient4$nCount_RNA < x) / length(patient4$nCount_RNA < x))))
+
+cumplot.log10 <- ggplot() + 
+  geom_point(data=cumplotdata,
+             aes(x=log10(x),y=y)) +
+  ggtitle("% of barcodes that are lower than x Counts") +
+  scale_y_continuous(breaks=seq(0,1,0.1)) +
+  coord_cartesian(ylim=c(0.5,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-cumplot-log10.svg"),cumplot.log10)
+
+cumplot.log10
+```
+
+Than we do the actual filtering for around 90% of the cells
+```{r}
+nCount_lowest <- 5
+barcode_metrics <- barcode_metrics[barcode_metrics$nCount > nCount_lowest,]
+```
+
+### Examine: UMI counts vs gene counts
+
+UMI and gene counts are highly correlated with each other. It is not possible to have more genes than counts (since every gene need at least one UMI count).
+
+```{r UMIvsGENE}
+UMIvsGENE.mito <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$percent.mito,
+                                colname = "percent.mito")
+UMIvsGENE.hk <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                              col = barcode_metrics$n.exp.hkgenes,
+                              colname = "n.exp.hkgenes")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-mito.svg"),UMIvsGENE.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-hk.svg"),UMIvsGENE.hk)
+```
+
+### Examine: mitochondrial gene expression vs housekeeper genes
+
+Usually, barcodes with high mitochondrial gene expression and low housekeeper gene expression are regarded as dying cells or cells undergoing large oxidative stress.
+
+```{r mitvshk}
+HKvsMITO.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics,
+                             col = log10(barcode_metrics$nCount),
+                             colname = "nCount_log10")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-HKvsMITO-UMI.svg"),HKvsMITO.UMI)
+```
+
+## Filtering Counts and Features
+
+```{r}
+#Cut-offs
+nCount_low <- 500
+nCount_high <- NA
+nFeature_low <- NA
+nFeature_high <- NA
+
+#Subset Seurat object
+patient4.filt <- subset(patient4,
+                        nCount_RNA > nCount_low
+                        #& nCount_RNA < nCount_high
+                        #& nFeature_RNA > nFeature_low 
+                        #& nFeature_RNA < nFeature_high
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$countfiltering <- NA
+barcode_metrics[barcode_metrics$nCount > nCount_low
+                #barcode_metrics$nCount < nCount_high & 
+                #barcode_metrics$nFeature > nFeature_low &
+                #barcode_metrics$nFeature < nFeature_high &
+                ,]$countfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$nCount > nCount_low
+                  #barcode_metrics$nCount < nCount_high & 
+                  #barcode_metrics$nFeature > nFeature_low &
+                  #barcode_metrics$nFeature < nFeature_high &
+),]$countfiltering <- "background"
+```
+
+### Examine: UMI counts vs gene counts after filtering
+
+```{r umivsgene-afterfilt}
+#All barcodes, colored by filtered cells with minimum count and feature numbers
+UMIvsGENE.filt <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$countfiltering,
+                                colname = "cells filtered", 
+                                xintercept = log10(c(nCount_low,nCount_high)), 
+                                yintercept = log10(c(nFeature_low,nFeature_high))) 
+
+#only cell barcodes, colored by percent.mito
+UMIvsGENE.cells.mito <- PlotUMIvsGENE(barcode_metrics[barcode_metrics$countfiltering == "cell",],
+                                      col = barcode_metrics[barcode_metrics$countfiltering == "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+# only NOT cells
+UMIvsGENE.notcells.mito <-  PlotUMIvsGENE(barcode_metrics[barcode_metrics$countfiltering != "cell",],
+                                          col = barcode_metrics[barcode_metrics$countfiltering != "cell",]$percent.mito,
+                                          colname = "percent.mito",
+                                          xintercept = log10(c(nCount_low,nCount_high)),
+                                          yintercept = log10(c(nFeature_low,nFeature_high)))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-filt.svg"),UMIvsGENE.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-cells-mito.svg"),UMIvsGENE.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-notcells-mito.svg"),UMIvsGENE.notcells.mito)
+```
+
+
+### Examine: mitochondrial gene expression and housekeeper genes vs counts
+
+```{r mitandhkvsumi-cf}
+UMIvsMITO.cf.hk <- PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                 col = barcode_metrics[barcode_metrics$countfiltering=="cell",]$n.exp.hkgenes,
+                                 colname = "n.exp.hkgenes")
+UMIvsHK.cf.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                               col = barcode_metrics[barcode_metrics$countfiltering=="cell",]$percent.mito,
+                               colname = "percent.mito")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsMITO-countfilt-hk.svg"),UMIvsMITO.cf.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsHK-countfilt-mito.svg"),UMIvsHK.cf.mito)
+```
+
+### Examine: mitochondrial gene expression vs housekeeper genes
+
+Usually, barcodes with high mitochondrial gene expression and low housekeeper gene expression are regarded as dying cells or cells undergoing large oxidative stress.
+
+```{r mitvshk-cf}
+HKvsMITO.cf.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                col = log10(barcode_metrics[barcode_metrics$countfiltering=="cell",]$nCount),
+                                colname = "nCount_log10")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-HKvsMITO-countfilt-UMI.svg"),HKvsMITO.cf.UMI)
+```
+
+## Filtering all
+
+Complete Filtering including also thresholds for mitochondrial and housekeeper genes.
+
+```{r}
+percent.mito_high <- 10
+n.exp.hkgenes_low <- NA
+
+#make sure, you also enable the nCount and Feature filter here!
+patient4.filt <- subset(patient4,
+                        nCount_RNA > nCount_low
+                        #& nCount_RNA < nCount_high
+                        #& nFeature_RNA > nFeature_low 
+                        #& nFeature_RNA < nFeature_high
+                        & percent.mito < percent.mito_high 
+                        #& n.exp.hkgenes > n.exp.hkgenes_low
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$manualfiltering <- NA
+barcode_metrics[barcode_metrics$percent.mito < percent.mito_high & 
+                  #barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                  #barcode_metrics$nCount < nCount_high & 
+                  #barcode_metrics$nFeature > nFeature_low &
+                  #barcode_metrics$nFeature < nFeature_high &
+                  barcode_metrics$nCount > nCount_low,]$manualfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$percent.mito < percent.mito_high & 
+                    #barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                    #barcode_metrics$nCount < nCount_high & 
+                    #barcode_metrics$nFeature > nFeature_low &
+                    #barcode_metrics$nFeature < nFeature_high &
+                    barcode_metrics$nCount > nCount_low),]$manualfiltering <- "background"
+```
+
+### Examine: UMI counts vs gene counts after filtering
+
+```{r umivsgene-afterfilt}
+#All barcodes, colored by filtered cells with minimum count and feature numbers
+UMIvsGENE.filt <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$manualfiltering,
+                                colname = "cells filtered", 
+                                xintercept = log10(c(nCount_low,nCount_high)), 
+                                yintercept = log10(c(nFeature_low,nFeature_high))) 
+
+#only cell barcodes, colored by percent.mito
+UMIvsGENE.cells.mito <- PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                      col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+# only NOT cells
+UMIvsGENE.notcells.mito <-  PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                          col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                          colname = "percent.mito",
+                                          xintercept = log10(c(nCount_low,nCount_high)),
+                                          yintercept = log10(c(nFeature_low,nFeature_high)))
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-filt.svg"),UMIvsGENE.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-cells-mito.svg"),UMIvsGENE.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsGENE-notcells-mito.svg"),UMIvsGENE.notcells.mito)
+```
+
+### Examine: mitochondrial gene expression and housekeeper genes vs counts after filtering
+
+```{r mitandhkvsumi-afterfilt}
+#all barcodes, colored by cells
+UMIvsMITO.filt <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics,
+                                 col = barcode_metrics$manualfiltering,
+                                 colname = "cells filtered",
+                                 xintercept = log10(c(nCount_low,nCount_high)),
+                                 yintercept = percent.mito_high)
+#only cells
+UMIvsMITO.cells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                     col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$n.exp.hkgenes,
+                                     colname = "n.exp.hkgenes",
+                                     xintercept = log10(c(nCount_low,nCount_high)),
+                                     yintercept = percent.mito_high) 
+#only not cells
+UMIvsMITO.notcells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                        col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$n.exp.hkgenes,
+                                        colname = "n.exp.hkgenes",
+                                        xintercept = log10(c(nCount_low,nCount_high)),
+                                        yintercept = percent.mito_high) 
+
+#all barcodes, colored by cells
+UMIvsHK.filt <-  PlotUMIvsHK(barcode_metrics = barcode_metrics,
+                             col = barcode_metrics$manualfiltering,
+                             colname = "cell",
+                             xintercept = log10(c(nCount_low,nCount_high)),
+                             yintercept = n.exp.hkgenes_low)
+#only cells
+UMIvsHK.cells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                  col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                  colname = "percent.mito",
+                                  xintercept = log10(c(nCount_low,nCount_high)),
+                                  yintercept = n.exp.hkgenes_low) 
+
+#only not cells
+UMIvsHK.notcells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                     col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                     colname = "percent.mito",
+                                     xintercept = log10(c(nCount_low,nCount_high)),
+                                     yintercept = n.exp.hkgenes_low) 
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsMITO-filt.svg"),UMIvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsMITO-cells-hk.svg"),UMIvsMITO.cells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsMITO-notcells-hk.svg"),UMIvsMITO.notcells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsHK-filt.svg"),UMIvsHK.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsHK-cells-mito.svg"),UMIvsHK.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-UMIvsHK-notcells-mito.svg"),UMIvsHK.notcells.mito)
+```
+
+### Examine: percent.mito vs n.exp.hkgenes after filtering
+
+```{r HKvsMITO-afterfilt}
+#all barcodes, colored by filtering
+HKvsMITO.filt <- PlotHKvsMITO(barcode_metrics = barcode_metrics,
+                              col = barcode_metrics$manualfiltering,
+                              colname = "cell",
+                              xintercept = n.exp.hkgenes_low,
+                              yintercept = percent.mito_high)
+
+#only cells, colored by nCounts
+HKvsMITO.cells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                   col = log10(barcode_metrics[barcode_metrics$manualfiltering == "cell",]$nCount),
+                                   colname = "nCount_log10",
+                                   xintercept = n.exp.hkgenes_low, 
+                                   yintercept = percent.mito_high)
+
+#only NOT cells, colored by nCounts
+HKvsMITO.notcells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                      col = log10(barcode_metrics[barcode_metrics$manualfiltering != "cell",]$nCount),
+                                      colname = "nCount_log10",
+                                      xintercept = n.exp.hkgenes_low, 
+                                      yintercept = percent.mito_high)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-HKvsMITO-filt.svg"),HKvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-HKvsMITO-cells-UMI.svg"),HKvsMITO.cells.UMI)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-filtering-HKvsMITO-notcells-UMI.svg"),HKvsMITO.notcells.UMI)
+```
+
+# HTO Demultiplexing Annotation
+
+## rename HTOs based on sample
+
+```{r}
+rownames(patient4.filt@assays$HTO@counts) <- c("4.1","4.2","4.3")
+rownames(patient4.filt@assays$HTO@data) <- c("4.1","4.2","4.3")
+  
+#names in HTO matrix
+HTO1 <- paste0("hto_",rownames(patient4.filt@assays$HTO)[1])
+HTO2 <- paste0("hto_",rownames(patient4.filt@assays$HTO)[2])
+HTO3 <- paste0("hto_",rownames(patient4.filt@assays$HTO)[3])
+```
+
+## Normalize HTO expression matrix
+
+```{r}
+patient4.filt <- NormalizeData(patient4.filt, assay = "HTO", normalization.method = "CLR") #centered log-ratio transformation
+```
+
+## Visualize normalized HTO Expression
+
+Scatter Expression Plots
+```{r HTO_expression_norm}
+htoexpression.norm.df <- FetchData(object = patient4.filt, vars = c(HTO1,HTO2,HTO3),slot = "data")
+
+HTOexpr123.norm <- ggExtra::ggMarginal(ggplot() + 
+                                         geom_point(aes(x=htoexpression.norm.df[,HTO1], y=htoexpression.norm.df[,HTO2],col=htoexpression.norm.df[,HTO3])) + 
+                                         scale_color_gradient(low = "black",high="yellow") + 
+                                         labs(x=HTO1,y=HTO2,col=HTO3) + 
+                                         theme_jb() +
+                                         theme(legend.position = "bottom"),
+                                       type = "densigram", 
+                                       bins=100)
+HTOexpr132.norm <- ggExtra::ggMarginal(ggplot() + 
+                                         geom_point(aes(x=htoexpression.norm.df[,HTO1], y=htoexpression.norm.df[,HTO3],col=htoexpression.norm.df[,HTO2])) + 
+                                         scale_color_gradient(low = "black",high="yellow") + 
+                                         labs(x=HTO1,y=HTO3,col=HTO2) + 
+                                         theme_jb() +
+                                         theme(legend.position = "bottom"),
+                                       type = "densigram", 
+                                       bins=100)
+HTOexpr231.norm <- ggExtra::ggMarginal(ggplot() + 
+                                         geom_point(aes(x=htoexpression.norm.df[,HTO2], y=htoexpression.norm.df[,HTO3],col=htoexpression.norm.df[,HTO1])) + 
+                                         scale_color_gradient(low = "black",high="yellow") + 
+                                         labs(x=HTO2,y=HTO3,col=HTO1) + 
+                                         theme_jb() +
+                                         theme(legend.position = "bottom"),
+                                       type = "densigram", 
+                                       bins=100)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-123.svg"),HTOexpr123.norm)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-132.svg"),HTOexpr132.norm)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-231.svg"),HTOexpr231.norm)
+```
+
+## HTO Demultiplexing with HTODemux
+
+### Determine best positive quantile value for distinguishing doublet/negative/singlet cells
+
+HTODemux uses a negative binomial distribution to set the HTO expression threshold for distinguishing samples. By default, this is 0.99 (99%). However, since we have a large overlap between our "Zero Expression"-Peak and our "sample-expression"-Peak, we get a high amount of negatives with the default value. Therefore, we look at values between 0.5 (50%) and 0.99 (99%) in 0.01 (1%) steps and determine the amount of singlets (single positive for one sample), doublets and negatives (not assigned to any sample). After this, we found the maximum singlet number and use this as a default. 
+However, if you want to especially identify doublets you may stick to 0.99 since these gives you the minimum amount of true-positive Doublets. Examine especially with the t-SNA in the end, whether this reflects the truth or not.
+Here, you should carefully examine this threshold and may pick another one manually that fits better.
+
+```{r HTO_quantile}
+#Plot quantile vs doublet/negative/singlet number
+patient4.filt.quant <- list()
+patient4.filt.quant.table <- list()
+for (quant in seq(0.5,0.99,0.01)) {
+  #Demultiplexing
+  patient4.filt.quant[[as.character(quant)]] <- patient4.filt
+  patient4.filt.quant[[as.character(quant)]] <- HTODemux(patient4.filt.quant[[as.character(quant)]], assay = "HTO", positive.quantile = quant)
+  patient4.filt.quant.table[[as.character(quant)]] <- table(patient4.filt.quant[[as.character(quant)]]$HTO_classification.global)
+}
+rm(patient4.filt.quant)
+
+demux.df <- data.frame(quantile=names(patient4.filt.quant.table),
+                       Doublet=unlist(lapply(patient4.filt.quant.table,function(x) x[1])),
+                       Negative=unlist(lapply(patient4.filt.quant.table,function(x) x[2])),
+                       Singlet=unlist(lapply(patient4.filt.quant.table,function(x) x[3])))
+
+HTOquant <- ggplot(data=reshape2::melt(demux.df)) + 
+  geom_bar(aes(x=quantile,y=value,fill=variable),
+           stat="identity",
+           position="dodge") +
+  labs(y="number of cells",fill="demultiplex") +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOquant.svg"),HTOquant, width=10)
+
+HTOquant
+```
+
+### Demultiplexing
+
+#### HTO Demux
+
+The expression of the hashing antibodies is very low, making demultiplexing more difficult. 
+We try high percentiles (strict cut-offs) and a lower cut-off choosing the highest amount of Singlets.
+
+```{r}
+#high confidence samples by default quantile of 99%
+patient4.filt <- HTODemux(patient4.filt, assay = "HTO", positive.quantile = 0.99, seed = 100)
+# patient4.filt$HTO_classification.global_hpq <- patient4.filt$HTO_classification.global
+# patient4.filt$HTO_classification_hpq <- patient4.filt$HTO_classification
+patient4.filt$hash.ID.hpq <- factor(patient4.filt$hash.ID,levels=c("Negative","Doublet",sub("hto_","",c(HTO1,HTO2,HTO3))))
+table(patient4.filt$HTO_classification.global)
+
+#lower confidence by positive quantile value with maximum of Singlets
+singletmaximum <- reshape2::melt(demux.df)[reshape2::melt(demux.df)$variable=="Singlet",][which.max(reshape2::melt(demux.df)[reshape2::melt(demux.df)$variable=="Singlet",][,3]),]
+posquantile <- as.numeric(as.character(singletmaximum[,"quantile"]))
+
+patient4.filt <- HTODemux(patient4.filt, assay = "HTO", positive.quantile = posquantile, seed = 100)
+# patient4.filt$HTO_classification.global_lpq <- patient4.filt$HTO_classification.global
+# patient4.filt$HTO_classification_lpq <- patient4.filt$HTO_classification
+patient4.filt$hash.ID.lpq <- factor(patient4.filt$hash.ID,levels=c("Negative","Doublet",sub("hto_","",c(HTO1,HTO2,HTO3))))
+table(patient4.filt$HTO_classification.global)
+```
+
+Quality control
+
+```{r}
+htoexpression.norm.df$hash.ID.hpq <- patient4.filt$hash.ID.hpq
+
+HTOexpr12.norm.hpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO2],
+                                                           col=htoexpression.norm.df[,"hash.ID.hpq"])) + 
+                                            labs(x=HTO1,y=HTO2,col="hash.ID.hpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr13.norm.hpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.hpq"])) + 
+                                            labs(x=HTO1,y=HTO3,col="hash.ID.hpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr23.norm.hpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO2],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.hpq"])) + 
+                                            labs(x=HTO2,y=HTO3,col="hash.ID.hpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-12-hpq.svg"),HTOexpr12.norm.hpq)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-13-hpq.svg"),HTOexpr13.norm.hpq)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-23-hpq.svg"),HTOexpr23.norm.hpq)
+
+htoexpression.norm.df$hash.ID.lpq <- patient4.filt$hash.ID.lpq
+
+HTOexpr12.norm.lpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO2],
+                                                           col=htoexpression.norm.df[,"hash.ID.lpq"])) + 
+                                            labs(x=HTO1,y=HTO2,col="hash.ID.lpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr13.norm.lpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.lpq"])) + 
+                                            labs(x=HTO1,y=HTO3,col="hash.ID.lpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr23.norm.lpq <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO2],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.lpq"])) + 
+                                            labs(x=HTO2,y=HTO3,col="hash.ID.lpq") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-12-lpq.svg"),HTOexpr12.norm.lpq)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-13-lpq.svg"),HTOexpr13.norm.lpq)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-23-lpq.svg"),HTOexpr23.norm.lpq)
+```
+
+UMAP Visualization of HTO Expression
+
+```{r HTO-umap}
+patient4.filt <- ScaleData(patient4.filt,
+                           assay = "HTO",
+                           features = rownames(GetAssayData(patient4.filt,assay = "HTO")))
+patient4.filt <- RunPCA(patient4.filt,
+                        assay = "HTO", 
+                        features = rownames(GetAssayData(patient4.filt,assay = "HTO")), 
+                        approx = FALSE,
+                        reduction.name = "pca_HTO")
+patient4.filt <- RunUMAP(patient4.filt,
+                         dims = 1:length(rownames(GetAssayData(patient4.filt,assay = "HTO"))),
+                         assay = "HTO", 
+                         umap.method = "uwot", #default
+                         graph = NULL, #default
+                         reduction = "pca_HTO",
+                         reduction.name = "umap_HTO")
+
+HTOumap.HTOexpr <- FeaturePlot(patient4.filt,
+                               pt.size = 1,
+                               reduction = "umap_HTO",
+                               features = rownames(GetAssayData(patient4.filt,assay = "HTO"))) +
+  theme_jb_nogrid()
+patient4.filt$nCount_RNA_log10 <- log10(patient4.filt$nCount_RNA)
+patient4.filt$nFeature_RNA_log10 <- log10(patient4.filt$nFeature_RNA)
+
+HTOumap.QC <- FeaturePlot(patient4.filt,
+                          features = c("HTO_margin","nCount_RNA_log10","nFeature_RNA_log10","percent.mito","n.exp.hkgenes"),
+                          reduction = "umap_HTO",
+                          cols = c("grey95", "blue"),
+                          ncol = 2,
+                          pt.size = 1,
+                          order = T,
+                          combine = F,
+                          slot = "data")
+HTOumap.QC <- lapply(HTOumap.QC, function(x) x + theme_jb_nogrid())
+names(HTOumap.QC) <- c("nCount_RNA_log10","nFeature_RNA_log10","percent.mito","n.exp.hkgenes")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTO-UMAP-HTOexpr.svg"),HTOumap.HTOexpr,width=5,height=5)
+lapply(names(HTOumap.QC), function(x) ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTO-UMAP-",x,".svg"),HTOumap.QC[[x]],width=5,height=5))
+HTOumap.HTOexpr
+HTOumap.QC
+```
+
+```{r}
+HTOumap.hashID.hpq <- DimPlot(patient4.filt,
+                              pt.size = 1,
+                              reduction = "umap_HTO",
+                              group.by = "hash.ID.hpq") + 
+  theme_jb_nogrid() +
+  theme(legend.position = "bottom")
+
+HTOumap.hashID.lpq <- DimPlot(patient4.filt,
+                              pt.size = 1,
+                              reduction = "umap_HTO",
+                              group.by = "hash.ID.lpq") + 
+  theme_jb_nogrid() +
+  theme(legend.position = "bottom")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTO-UMAP-hashID-hpq.svg"),HTOumap.hashID.hpq,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTO-UMAP-hashID-lpq.svg"),HTOumap.hashID.lpq,width=5,height=5)
+
+HTOumap.hashID.hpq
+HTOumap.hashID.lpq
+```
+
+#### Manual HTO Demultiplexing
+
+A problem with HTODemux is due to the low expression of MET2-0253 we have  either high negative or high doublet counts. In order to adjust for this effect, we changed manual filtering thresholds based on the thresholds from HTODemux and treat the hashing antibodies differently.
+
+```{r}
+HTO1thres <- 134
+HTO2thres <- 349
+HTO3thres <- 279
+
+HTOcounts <- FetchData(object = patient4.filt, vars = c(HTO1,HTO2,HTO3),slot = "counts")
+
+HTOthresmat <- data.frame(HTOcounts[,HTO1] > HTO1thres,
+                          HTOcounts[,HTO2] > HTO2thres,
+                          HTOcounts[,HTO3] > HTO3thres)
+names(HTOthresmat) <-c(HTO1,HTO2,HTO3)
+rownames(HTOthresmat) <-rownames(HTOcounts)
+HTOthresmat$hash.maxID <- names(HTOthresmat)[apply(HTOthresmat,1,which.max)]
+
+HTOcounts$manuelfilt <- NA
+#Singlet Annotation
+HTOcounts[apply(HTOthresmat[,1:3],1,sum)==1,]$manuelfilt <- sub("hto_","",HTOthresmat$hash.maxID[apply(HTOthresmat[,1:3],1,sum)==1])
+HTOcounts[apply(HTOthresmat[,1:3],1,sum)==0,]$manuelfilt <- "Negative"
+HTOcounts[apply(HTOthresmat[,1:3],1,sum)>1,]$manuelfilt <- "Doublet"
+
+patient4.filt$hash.ID.man <- factor(HTOcounts$manuelfilt,levels=c("Negative","Doublet",sub("hto_","",c(HTO1,HTO2,HTO3))))
+```
+
+### Quality control
+
+#### Check annotation on normalized antibody expression plots
+
+```{r}
+htoexpression.norm.df$hash.ID.man <- patient4.filt$hash.ID.man
+
+HTOexpr12.norm.man <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO2],
+                                                           col=htoexpression.norm.df[,"hash.ID.man"])) + 
+                                            labs(x=HTO1,y=HTO2,col="hash.ID.man") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr13.norm.man <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO1],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.man"])) + 
+                                            labs(x=HTO1,y=HTO3,col="hash.ID.man") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+HTOexpr23.norm.man <- ggExtra::ggMarginal(ggplot() + 
+                                            geom_point(aes(x=htoexpression.norm.df[,HTO2],
+                                                           y=htoexpression.norm.df[,HTO3],
+                                                           col=htoexpression.norm.df[,"hash.ID.man"])) + 
+                                            labs(x=HTO2,y=HTO3,col="hash.ID.man") + 
+                                            theme_jb() +
+                                            theme(legend.position = "bottom",legend.text = element_text(size=8)),
+                                          type = "densigram", 
+                                          bins=100)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-12-man.svg"),HTOexpr12.norm.man)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-13-man.svg"),HTOexpr13.norm.man)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTOexpr-norm-23-man.svg"),HTOexpr23.norm.man)
+```
+
+```{r}
+HTOumap.hashID.man <- DimPlot(patient4.filt,
+                              pt.size = 1,
+                              reduction = "umap_HTO",
+                              group.by = "hash.ID.man") + 
+  theme_jb_nogrid() +
+  theme(legend.position = "bottom")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-demux-HTO-UMAP-hashID-man.svg"),HTOumap.hashID.man,width=5,height=5)
+
+HTOumap.hashID.man
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r}
+#log-normalization for slot "data"
+patient4.filt <- NormalizeData(patient4.filt, 
+                               normalization.method = "LogNormalize", #default
+                               scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                               assay = "RNA",
+                               margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+patient4.filt <- FindVariableFeatures(patient4.filt, 
+                                      assay = "RNA",
+                                      selection.method = "vst", #default
+                                      nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data" by all genes, not only most variable ones
+allgenes <- rownames(patient4.filt)
+patient4.filt <- ScaleData(patient4.filt, 
+                           features = allgenes, 
+                           do.scale = T,
+                           do.center = T,
+                           scale.max = 10, 
+                           assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+patient4.filt <- CellCycleScoring(patient4.filt,
+                                  s.features = cc.genes.updated.2019$s.genes,
+                                  g2m.features = cc.genes.updated.2019$g2m.genes, 
+                                  assay="RNA")
+```
+
+## Normalization with SCTransform
+
+```{r}
+patient4.filt <- SCTransform(patient4.filt, 
+                             ncells = ncol(patient4.filt),
+                             assay="RNA", #default
+                             new.assay.name = "SCT", #default
+                             do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                             variable.features.n = 3000, #default set variable features
+                             vars.to.regress = NULL, #default optional variables to regress out
+                             do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                             do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                             return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                             seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+```{r}
+patient4.filt <- RunPCA(patient4.filt, 
+                        npcs = 50,  #number of PCs to use
+                        assay = "SCT",
+                        rev.pca = F, # default, Run cell x gene matrix
+                        weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                        approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                        features = VariableFeatures(patient4.filt,assay = "SCT"), #default
+                        reduction.name = "pca_SCT",
+                        verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCT <- patient4.filt@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(patient4.filt@assays$SCT@scale.data)[VariableFeatures(patient4.filt,assay = "SCT"),]))
+
+#PCA plot
+PCAplot.SCT <- DimPlot(patient4.filt, reduction = "pca_SCT", dims = c(1,2), group.by = "hash.ID") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 15
+
+#based on PCA
+patient4.filt <- FindNeighbors(patient4.filt, 
+                               dims = 1:numberofPCs, 
+                               reduction = "pca_SCT",
+                               assay = "SCT")
+patient4.filt <- FindClusters(patient4.filt, 
+                              resolution = 1,
+                              random.seed=100)
+
+patient4.filt$seurat_clusters_all_SCT_PCA <- patient4.filt$seurat_clusters
+patient4.filt$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+patient4.filt <- RunUMAP(patient4.filt,
+                         dims = 1:numberofPCs,
+                         assay = "SCT",
+                         umap.method = "uwot", # Seurat default
+                         graph=NULL, #default
+                         reduction="pca_SCT",
+                         reduction.name = "umap_SCT"
+)
+```
+
+Explore UMAP with different annotations
+
+```{r}
+UMAP.SCT.clusPCA <- DimPlot(patient4.filt, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_all_SCT_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.hashIDman <- DimPlot(patient4.filt, 
+                              reduction = "umap_SCT", 
+                              pt.size = 1, 
+                              label = F, 
+                              group.by = "hash.ID.man") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.QC <- FeaturePlot(patient4.filt, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCT", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           order = T,
+                           slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-clusPCA-noleg.svg"),UMAP.SCT.clusPCA + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-hashIDman.svg"),UMAP.SCT.hashIDman, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-hashIDman-noleg.svg"),UMAP.SCT.hashIDman + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-QC.svg"),UMAP.SCT.QC, width=10, height=15)
+
+UMAP.SCT.clusPCA
+UMAP.SCT.hashIDman
+UMAP.SCT.QC
+```
+
+# Cell Type identification
+
+Manual annotation based on marker gene expression from various literature references.
+
+## Marker Gene Expression
+
+```{r}
+UMAP.SCT.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(patient4.filt,celltypemarkers[[x]],reduction = "umap_SCT"))
+names(UMAP.SCT.marker) <- names(celltypemarkers)
+
+lapply(names(UMAP.SCT.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-marker-",x,".svg"),UMAP.SCT.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+
+UMAP.SCT.marker
+```
+
+## Celltype Annotation
+
+```{r umap-celltype}
+Idents(patient4.filt) <- patient4.filt$seurat_clusters_all_SCT_PCA
+patient4.filt <- RenameIdents(patient4.filt,
+                              "0" = "B-Cells",
+                              "1" = "T-Cells",
+                              "2" = "T-Cells",
+                              "3" = "T-Cells",
+                              "4" = "T-Cells",
+                              "5" = "T-Cells",
+                              "6" = "B-Cells",
+                              "7" = "T-Cells",
+                              "8" = "Fibroblasts",
+                              "9" = "myeloid cells",
+                              "10" = "T-Cells",
+                              "11" = "Plasmablasts",
+                              "12" = "B-Cells",
+                              "13" = "T-Cells",
+                              "14" = "B-Cells",
+                              "15" = "Tumor",
+                              "16" = "RBCs",
+                              "17" = "ECs",
+                              "18" = "B-Cells"
+)
+patient4.filt$CellType <- Idents(patient4.filt)
+```
+
+## UMAP
+
+```{r}
+UMAP.SCT.celltype <- DimPlot(patient4.filt,
+                             reduction = "umap_SCT", 
+                             pt.size = 1, 
+                             label = T, 
+                             group.by = "CellType") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-celltype.svg"),UMAP.SCT.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient4-all-SCT-UMAP-celltype-noleg.svg"),UMAP.SCT.celltype + theme(legend.position = "none") + labs(title = NULL), width=5, height=5)
+UMAP.SCT.celltype
+```
+
+# Save 
+
+```{r}
+#single Seurat object
+save(file = paste0(OUTPUT,"RData/patient4.RData"),patient4.filt)
+#sessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient4-preprocessing-sessionInfo.txt"))
+```

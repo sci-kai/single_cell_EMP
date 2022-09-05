@@ -1,0 +1,803 @@
+---
+title: "B-Cells"
+author: "Kai"
+date: "16th March 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(SingleR)
+library(fgsea)
+library(cowplot)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+# Load Seurat object
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt.RData"))
+```
+
+# Subset cells and evaluate subsetting
+
+```{r}
+SCC.B <- subset(SCC,cells = names(SCC$CellType_SCTccmito_harmony[SCC$CellType_SCTccmito_harmony %in% c("B-Cells","Plasmablasts")])) 
+rm(SCC)
+
+DefaultAssay(SCC.B) <- "RNA"
+SCC.B@assays$SCT <- NULL
+SCC.B@assays$SCTccmito <- NULL
+for (x in names(SCC.B@reductions)) {SCC.B@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(SCC.B) <- "RNA"
+#log-normalization for slot "data"
+SCC.B <- NormalizeData(SCC.B, 
+                       normalization.method = "LogNormalize", #default
+                       scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                       assay = "RNA",
+                       margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+SCC.B <- FindVariableFeatures(SCC.B, 
+                              assay = "RNA",
+                              selection.method = "vst", #default
+                              nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+SCC.B <- ScaleData(SCC.B, 
+                   features = VariableFeatures(SCC.B,assay = "RNA"), 
+                   do.scale = T,
+                   do.center = T,
+                   scale.max = 10,
+                   assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+SCC.B <- CellCycleScoring(SCC.B,
+                          s.features = cc.genes.updated.2019$s.genes,
+                          g2m.features = cc.genes.updated.2019$g2m.genes, 
+                          assay="RNA")
+```
+
+## Normalization with SCTransform
+
+No regression because of high amount of cycling cells
+
+```{r SCC_normalization}
+SCC.B <- SCTransform(SCC.B, 
+                     ncells = ncol(SCC.B),
+                     assay="RNA", #default
+                     new.assay.name = "SCT", #default; overwrites old SCT
+                     do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                     variable.features.n = 3000, #default set variable features
+                     vars.to.regress = NULL, #default optional variables to regress out
+                     do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                     do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                     return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                     seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+SCC.B <- RunPCA(SCC.B, 
+                npcs = 50,  #number of PCs to use
+                assay = "SCT",
+                rev.pca = F, # default, Run cell x gene matrix
+                weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                features = VariableFeatures(SCC.B,assay = "SCT"), #default
+                reduction.name = "pca_SCT",
+                verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCT <- SCC.B@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC.B@assays$SCT@scale.data)[VariableFeatures(SCC.B,assay = "SCT"),]))
+
+#PCA plot
+PCAplot.SCT <- DimPlot(SCC.B, reduction = "pca_SCT", dims = c(1,2), group.by = "hash.ID") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                             PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+# Harmony batch correction
+
+```{r}
+library(harmony)
+set.seed(42)
+SCC.B <- RunHarmony(SCC.B,
+                    reduction = "pca_SCT",
+                    group.by.vars = "lib",
+                    reduction.save = "harmony_SCT",
+                    plot_convergence = T,
+                    max.iter.harmony = 30,
+                    assay.use = "SCT",
+                    project.dim = F)
+```
+
+### Graph-based clustering
+
+```{r FindClusters}
+DefaultAssay(SCC.B) <- "SCT"
+numberofPCs = 20
+#based on harmony
+SCC.B <- FindNeighbors(SCC.B,
+                       dims = 1:numberofPCs,
+                       reduction = "harmony_SCT",
+                       assay = "SCT")
+SCC.B <- FindClusters(SCC.B,
+                      resolution = 2,
+                      random.seed = 100)
+
+SCC.B$seurat_clusters_BCells_SCT_PCA_harmony <- SCC.B$seurat_clusters
+SCC.B$seurat_clusters <- NULL
+```
+
+### UMAP
+
+```{r}
+SCC.B <- RunUMAP(SCC.B,
+                 dims = 1:numberofPCs,
+                 assay = "SCT",
+                 umap.method = "uwot", # Seurat default
+                 graph = NULL, #default
+                 reduction = "harmony_SCT",
+                 reduction.name = "humap_SCT",
+                 reduction.key = "humap_SCT"
+)
+```
+
+```{r}
+umapharmony.SCT.clusPCAharmony <- DimPlot(SCC.B,
+                                                reduction = "humap_SCT",
+                                                pt.size = 1,
+                                                label = T,
+                                                group.by = "seurat_clusters_BCells_SCT_PCA_harmony") +
+  theme_jb_nogrid()
+
+umapharmony.SCT.patients <- DimPlot(SCC.B,
+                                          reduction = "humap_SCT",
+                                          pt.size = 1,
+                                          label = F,
+                                          group.by = "patient") + 
+  theme_jb_nogrid()
+
+umapharmony.SCT.sample <- DimPlot(SCC.B,
+                                        reduction = "humap_SCT",
+                                        pt.size = 1,
+                                        label = F,
+                                        group.by = "sample") + 
+  theme_jb_nogrid()
+
+umapharmony.SCT.Lok <- DimPlot(SCC.B,
+                                     reduction = "humap_SCT",
+                                     pt.size = 1,
+                                     label = F,
+                                     group.by = "Lok") + 
+  theme_jb_nogrid()
+
+umapharmony.SCT.lib <- DimPlot(SCC.B,
+                                     reduction = "humap_SCT",
+                                     pt.size = 1,
+                                     label = F,
+                                     group.by = "lib") + 
+  theme_jb_nogrid()
+
+umapharmony.SCT.Phase <- DimPlot(SCC.B,
+                                       reduction = "humap_SCT",
+                                       pt.size = 1,
+                                       label = F,
+                                       group.by = "Phase") + 
+  theme_jb_nogrid()
+
+UMAPharmony.SCT.qc <- FeaturePlot_markers_comb(SCC.B,c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"),reduction = "humap_SCT")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-clusPCAharmony.svg"),umapharmony.SCT.clusPCAharmony)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-clusPCAharmony-noleg.svg"),umapharmony.SCT.clusPCAharmony + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-patients.svg"),umapharmony.SCT.patients)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-patients-noleg.svg"),umapharmony.SCT.patients + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-sample.svg"),umapharmony.SCT.sample)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-sample-noleg.svg"),umapharmony.SCT.sample + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-Lok.svg"),umapharmony.SCT.Lok)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-Lok-noleg.svg"),umapharmony.SCT.Lok + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-lib.svg"),umapharmony.SCT.lib)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-lib-noleg.svg"),umapharmony.SCT.lib + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-Phase.svg"),umapharmony.SCT.Phase)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-Phase-noleg.svg"),umapharmony.SCT.Phase + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCT-UMAPharmony-QC.svg"),UMAPharmony.SCT.qc, width=10, height=10)
+
+umapharmony.SCT.clusPCAharmony
+umapharmony.SCT.patients
+umapharmony.SCT.sample
+umapharmony.SCT.Lok
+umapharmony.SCT.lib
+umapharmony.SCT.Phase
+UMAPharmony.SCT.qc
+```
+
+# Cell cycle and mitochondrial percentage regression
+
+## Normalization with SCTransform
+
+```{r SCC_normalization}
+SCC.B <- SCTransform(SCC.B, 
+                     ncells = ncol(SCC.B),
+                     assay="RNA", #default
+                     new.assay.name = "SCTccmito", #default; overwrites old SCTccmito
+                     do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                     variable.features.n = 3000, #default set variable features
+                     vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                     do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                     do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                     return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                     seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCTccmito assay
+
+```{r}
+SCC.B <- RunPCA(SCC.B, 
+                npcs = 50,  #number of PCs to use
+                assay = "SCTccmito",
+                rev.pca = F, # default, Run cell x gene matrix
+                weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                features = VariableFeatures(SCC.B,assay = "SCTccmito"), #default
+                reduction.name = "pca_SCTccmito",
+                verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- SCC.B@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC.B@assays$SCTccmito@scale.data)[VariableFeatures(SCC.B,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(SCC.B, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "hash.ID") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+
+PCAplot.SCTccmito
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+```
+
+# Harmony batch correction
+
+```{r}
+library(harmony)
+set.seed(42)
+SCC.B <- RunHarmony(SCC.B,
+                    reduction="pca_SCTccmito",
+                    group.by.vars = "lib",
+                    reduction.save = "harmony_SCTccmito",
+                    plot_convergence = T,
+                    max.iter.harmony = 30,
+                    assay.use = "SCTccmito",
+                    project.dim = F)
+```
+
+### Graph-based clustering
+
+```{r FindClusters}
+DefaultAssay(SCC.B) <- "SCTccmito"
+numberofPCs = 20
+#based on harmony
+SCC.B <- FindNeighbors(SCC.B,
+                       dims = 1:numberofPCs,
+                       reduction = "harmony_SCTccmito",
+                       assay = "SCTccmito")
+SCC.B <- FindClusters(SCC.B,
+                      resolution = 0.8,
+                      random.seed = 100)
+
+SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony <- SCC.B$seurat_clusters
+SCC.B$seurat_clusters <- NULL
+```
+
+### UMAP
+
+```{r}
+SCC.B <- RunUMAP(SCC.B,
+                 dims = 1:numberofPCs,
+                 assay = "SCTccmito",
+                 umap.method = "uwot", # Seurat default
+                 graph = NULL, #default
+                 reduction = "harmony_SCTccmito",
+                 reduction.name = "humap_SCTccmito",
+                 reduction.key = "humap_SCTccmito"
+)
+```
+
+```{r}
+umapharmony.SCTccmito.clusPCAharmony <- DimPlot(SCC.B,
+                                                reduction = "humap_SCTccmito",
+                                                pt.size = 1,
+                                                label = T,
+                                                group.by = "seurat_clusters_BCells_SCTccmito_PCA_harmony") +
+  theme_jb_nogrid()
+
+umapharmony.SCTccmito.patients <- DimPlot(SCC.B,
+                                          reduction = "humap_SCTccmito",
+                                          pt.size = 1,
+                                          label = F,
+                                          group.by = "patient") + 
+  theme_jb_nogrid()
+
+umapharmony.SCTccmito.sample <- DimPlot(SCC.B,
+                                        reduction = "humap_SCTccmito",
+                                        pt.size = 1,
+                                        label = F,
+                                        group.by = "sample") + 
+  theme_jb_nogrid()
+
+umapharmony.SCTccmito.Lok <- DimPlot(SCC.B,
+                                     reduction = "humap_SCTccmito",
+                                     pt.size = 1,
+                                     label = F,
+                                     group.by = "Lok") + 
+  theme_jb_nogrid()
+
+umapharmony.SCTccmito.lib <- DimPlot(SCC.B,
+                                     reduction = "humap_SCTccmito",
+                                     pt.size = 1,
+                                     label = F,
+                                     group.by = "lib") + 
+  theme_jb_nogrid()
+
+umapharmony.SCTccmito.Phase <- DimPlot(SCC.B,
+                                       reduction = "humap_SCTccmito",
+                                       pt.size = 1,
+                                       label = F,
+                                       group.by = "Phase") + 
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.qc <- FeaturePlot_markers_comb(SCC.B,c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"),reduction = "humap_SCTccmito")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-clusPCAharmony.svg"),umapharmony.SCTccmito.clusPCAharmony)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-clusPCAharmony-noleg.svg"),umapharmony.SCTccmito.clusPCAharmony + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-patients.svg"),umapharmony.SCTccmito.patients)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-patients-noleg.svg"),umapharmony.SCTccmito.patients + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-sample.svg"),umapharmony.SCTccmito.sample)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-sample-noleg.svg"),umapharmony.SCTccmito.sample + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-Lok.svg"),umapharmony.SCTccmito.Lok)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-Lok-noleg.svg"),umapharmony.SCTccmito.Lok + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-lib.svg"),umapharmony.SCTccmito.lib)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-lib-noleg.svg"),umapharmony.SCTccmito.lib + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-Phase.svg"),umapharmony.SCTccmito.Phase)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-Phase-noleg.svg"),umapharmony.SCTccmito.Phase + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-QC.svg"),UMAPharmony.SCTccmito.qc, width=10, height=10)
+
+umapharmony.SCTccmito.clusPCAharmony
+umapharmony.SCTccmito.patients
+umapharmony.SCTccmito.sample
+umapharmony.SCTccmito.Lok
+umapharmony.SCTccmito.lib
+umapharmony.SCTccmito.Phase
+UMAPharmony.SCTccmito.qc
+```
+
+# Marker Gene Expression
+
+```{r}
+UMAPharmony.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(SCC.B,celltypemarkers[[x]],reduction = "humap_SCTccmito"))
+names(UMAPharmony.SCTccmito.marker) <- names(celltypemarkers)
+
+lapply(names(UMAPharmony.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-marker-",x,".png"),UMAPharmony.SCTccmito.marker[[x]],dpi=300, width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+
+UMAPharmony.SCTccmito.marker
+```
+
+# SingleR
+
+## clustering
+
+```{r}
+DefaultAssay(SCC.B) <- "SCTccmito"
+numberofPCs <- 20
+#separately for resolution 100
+#clustering
+SCC.B <- FindNeighbors(SCC.B,
+                       dims = 1:numberofPCs,
+                       reduction = "harmony_SCTccmito",
+                       assay = "SCTccmito")
+SCC.B <- FindClusters(SCC.B,
+                      resolution = 100,
+                      random.seed = 100)
+
+SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony_res100 <- SCC.B$seurat_clusters
+SCC.B$seurat_clusters <- NULL
+
+# plot
+umapharmony.SCTccmito.clusPCAharmonyres100 <- DimPlot(SCC.B,
+                                                      reduction = "humap_SCTccmito",
+                                                      pt.size = 1,
+                                                      label = F,
+                                                      group.by = "seurat_clusters_BCells_SCTccmito_PCA_harmony_res100") + 
+  labs(title=NULL) +
+  theme_jb_nogrid() + 
+  theme(legend.position = "none")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-clusPCAharmony-res100-noleg.png"),umapharmony.SCTccmito.clusPCAharmonyres100, width = 5, height = 5)
+
+umapharmony.SCTccmito.clusPCAharmonyres100
+```
+
+## SingleR for high resolution cluster
+
+```{r}
+#Load reference data set
+monaco.ref <- MonacoImmuneData()
+# run singleR
+predclus.monaco <- SingleR(test = GetAssayData(SCC.B, slot = "data",assay = "SCTccmito"), 
+                           ref = monaco.ref, 
+                           assay.type.test = 1,
+                           clusters = SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony_res100,
+                           labels = monaco.ref$label.fine)
+
+# add singleR annotations to the seurat object
+cluslabels.monaco <- predclus.monaco$labels
+names(cluslabels.monaco) <- rownames(predclus.monaco)
+
+SCC.B$SingleR.monaco.res100 <- cluslabels.monaco[match(SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony_res100,names(cluslabels.monaco))]
+
+#plot it
+UMAPharmony.SCTccmito.singleR_monaco_res100 <- DimPlot(SCC.B, 
+                                                       reduction = "humap_SCTccmito", 
+                                                       pt.size = 1, 
+                                                       label = T, 
+                                                       group.by = "SingleR.monaco.res100") +  
+  theme_jb_nogrid()
+UMAPharmony.SCTccmito.singleR_monaco_res100.nol <- DimPlot(SCC.B, 
+                                                           reduction = "humap_SCTccmito", 
+                                                           pt.size = 1, 
+                                                           label = F, 
+                                                           group.by = "SingleR.monaco.res100") +  
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-SingleR-monaco_res100.svg"),UMAPharmony.SCTccmito.singleR_monaco_res100, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-SingleR-monaco_res100-noleg.svg"),UMAPharmony.SCTccmito.singleR_monaco_res100 + theme(legend.position = "none"), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-SingleR-monaco_res100-nolabelleg.svg"),UMAPharmony.SCTccmito.singleR_monaco_res100.nol + theme(legend.position = "none"), width = 5, height = 5)
+
+UMAPharmony.SCTccmito.singleR_monaco_res100
+```
+
+```{r}
+#all types separately
+UMAPharmony.SCTccmito.singleR_monaco_res100.type <- list()
+for (type in unique(SCC.B$SingleR.monaco.res100)) {
+  SCC.B <- AddMetaData(SCC.B, SCC.B$SingleR.monaco.res100 == type, col.name = paste0("SingleR.monaco.res100.",type))
+  
+  UMAPharmony.SCTccmito.singleR_monaco_res100.type[[type]] <- DimPlot(SCC.B, 
+                                                                      reduction = "humap_SCTccmito", 
+                                                                      pt.size = 1, 
+                                                                      label = F, 
+                                                                      order = "TRUE",
+                                                                      cols = c("grey95","blue"),
+                                                                      group.by = paste0("SingleR.monaco.res100.",gsub("-",".",gsub(" ",".",gsub("/",".",type))))) +  
+    ggtitle(type) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-SingleR-monaco-res100-",gsub("-",".",gsub(" ",".",gsub("/",".",type))),"-noleg.png"),UMAPharmony.SCTccmito.singleR_monaco_res100.type[[type]] + theme(legend.position = "none"), width = 5, height = 5)
+}
+
+UMAPharmony.SCTccmito.singleR_monaco_res100.type
+```
+
+# Differential expression
+
+```{r}
+SCC.B.clusharmony <- calculate_foldchanges(SCC.B,SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.B.clusharmony <- SCC.B.clusharmony[(SCC.B.clusharmony$pct.1 > 0.1 | SCC.B.clusharmony$pct.2 > 0.1) & abs(SCC.B.clusharmony$avg_log2FC)>0.25,]
+```
+
+## Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_clusharmony = function(x) {
+  c(sort(SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_clusharmony = function(x) {
+  c(sort(SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,]$pct.1 - SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.B.clusharmony.volpct <- lapply(levels(SCC.B.clusharmony$cluster), function(x) ggvolcano(SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,],logFCcutoff_clusharmony(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.B.clusharmony.volpct) <- levels(SCC.B.clusharmony$cluster)
+
+SCC.B.clusharmony.volpctdiff <- lapply(levels(SCC.B.clusharmony$cluster), function(x) ggvolcano(SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,],pctdiffcutoff_clusharmony(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.B.clusharmony.volpctdiff) <- levels(SCC.B.clusharmony$cluster)
+
+#save volcano plots
+for (i in names(SCC.B.clusharmony.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-volcanopct-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.B.clusharmony.volpct[[i]])
+}
+for (i in names(SCC.B.clusharmony.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-volcanopctdiff-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.B.clusharmony.volpctdiff[[i]])
+}
+
+SCC.B.clusharmony.volpct
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+FCranks.clusharmony <- list()
+for (cl in unique(SCC.B.clusharmony$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.clusharmony[[cl]] <- SCC.B.clusharmony[SCC.B.clusharmony$cluster==cl,]$avg_log2FC
+  names(FCranks.clusharmony[[cl]]) <- SCC.B.clusharmony[SCC.B.clusharmony$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.clusharmony[[cl]][is.infinite(FCranks.clusharmony[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.clusharmony <- list()
+for (cl in levels(SCC.B.clusharmony$cluster)) {
+  GS.gsea.clusharmony[[cl]] <- fgsea(pathways=GS,
+                                     stats=FCranks.clusharmony[[cl]],
+                                     minSize=15,
+                                     maxSize=500,
+                                     nperm=10000)
+}
+
+#remove GO in name and put to lower cases
+GS.gsea.clusharmony.plot <- lapply(GS.gsea.clusharmony,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.clusharmony.plot <- lapply(GS.gsea.clusharmony.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                           gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+numberofGS = 5
+
+GS.gseavis.clusharmony <- lapply(names(GS.gsea.clusharmony.plot), function(x) {
+  try(GSEAvis(GSEAdf = GS.gsea.clusharmony.plot[[x]],
+              pvalthres = NULL,
+              NESthres = NULL,
+              npathways = numberofGS,
+              sort = "NES",
+              positive = T) +
+        labs(x=x,y="") +
+        scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.clusharmony.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$padj[1:numberofGS]}))))),
+                             colours = c("white","blue")) +
+        coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.clusharmony.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$NES[1:numberofGS]}))))) +
+        scale_y_continuous(breaks = seq(0,20,0.5))
+  )}) 
+names(GS.gseavis.clusharmony) <- names(GS.gsea.clusharmony.plot)
+lapply(names(GS.gsea.clusharmony.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-GS-top",numberofGS,"byNES-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",x)))),".svg"),GS.gseavis.clusharmony[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+GS.gseavis.clusharmony.comb <- lapply(1:(length(GS.gseavis.clusharmony)-1), function(x) {
+  GS.gseavis.clusharmony[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gseavis.clusharmony.comb[[length(GS.gseavis.clusharmony.comb)+1]] <- GS.gseavis.clusharmony[[length(GS.gseavis.clusharmony)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-GS-top",numberofGS,"byNES-all.svg"),
+           plot_grid(plotlist = GS.gseavis.clusharmony.comb,ncol=1,align = "v",labels=NULL),
+           width=10, 
+           height=20))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-GS-top",numberofGS,"byNES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.clusharmony.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=10, 
+           height=20))
+
+GS.gseavis.clusharmony.comb <- lapply(1:(length(GS.gseavis.clusharmony)), function(x) {
+  GS.gseavis.clusharmony[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-GS-top",numberofGS,"byNES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.clusharmony.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=10, 
+           height=20))
+```
+
+## Heatmap of top differentially expressed genes
+
+```{r}
+topgenes = 10
+
+#choose those top genes
+SCC.B.clusharmony.percluster <- lapply(unique(SCC.B.clusharmony$cluster), function(x) SCC.B.clusharmony[SCC.B.clusharmony$cluster==x,])
+names(SCC.B.clusharmony.percluster) <- unique(SCC.B.clusharmony$cluster)
+
+top.logFC.clusharmony <- list()
+highlightgenes.clusharmony <- list()
+for (cl in names(SCC.B.clusharmony.percluster)) {
+  #top avg FC
+  top.logFC.clusharmony[[cl]] <- head(SCC.B.clusharmony.percluster[[cl]][order(SCC.B.clusharmony.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.clusharmony[[cl]] <- data.frame(genes=top.logFC.clusharmony[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.clusharmony <- as.data.frame(data.table::rbindlist(highlightgenes.clusharmony))
+
+SCC.B <- ScaleData(SCC.B,
+                   features = as.character(highlightgenes.clusharmony$genes),
+                   do.scale = T,
+                   do.center = T,
+                   scale.max = 10,
+                   assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC.B, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.clusharmony <- expr.RNAscaledata[as.character(highlightgenes.clusharmony$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.clusharmony <- c(-max(abs(expr.RNAscaledata.hl.clusharmony)),
+                                             -(mean(unlist(abs(expr.RNAscaledata.hl.clusharmony))[unlist(abs(expr.RNAscaledata.hl.clusharmony))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.clusharmony))[unlist(abs(expr.RNAscaledata.hl.clusharmony))!=0])),
+                                             0,
+                                             mean(unlist(abs(expr.RNAscaledata.hl.clusharmony))[unlist(abs(expr.RNAscaledata.hl.clusharmony))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.clusharmony))[unlist(abs(expr.RNAscaledata.hl.clusharmony))!=0]),
+                                             max(abs(expr.RNAscaledata.hl.clusharmony)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.clusharmony.hm <- Heatmap(expr.RNAscaledata.hl.clusharmony,
+                                               name="scale.data",
+                                               col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.clusharmony, colors = c("red","purple", "black", "yellow","white")),
+                                               show_column_names = F,
+                                               show_row_names = T,
+                                               cluster_columns = T,
+                                               cluster_column_slices = F,
+                                               clustering_method_columns = "ward.D2",
+                                               clustering_distance_columns = "euclidean",
+                                               column_split = SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony,
+                                               row_split = factor(highlightgenes.clusharmony$state, levels = levels(SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony)),
+                                               cluster_rows = F, row_order = highlightgenes.clusharmony$genes,
+                                               row_title_rot = 0,
+                                               column_title_rot = 90,
+                                               #graphic options
+                                               row_names_gp = gpar(fontsize=7),
+                                               column_names_gp = gpar(fontsize=11),
+                                               row_title_gp = gpar(fontsize=11),
+                                               column_title_gp = gpar(fontsize=11),
+                                               heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                               border = T,
+                                               use_raster = T,
+                                               raster_device = "CairoPNG",
+                                               raster_quality = 4,
+                                               height = unit(20,"in"),
+                                               width = unit(10,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/SCCfilt-BCells-diffexpr-SCTccmito-clusharmony-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=30)
+expr.RNAscaledata.hl.clusharmony.hm
+dev.off()
+```
+
+# check cell cycle expression clustering
+
+```{r}
+DimPlot(AddMetaData(SCC.B,SCC.B$S.Score>0.15 | SCC.B$G2M.Score>0.15,"cycling"),group.by = "cycling",reduction = "humap_SCTccmito",cols=c("grey95","blue"),order=T)
+```
+
+# Annotate non-B-cells
+
+```{r}
+SCC.B$CellType_BCells <- as.character(SCC.B$seurat_clusters_BCells_SCTccmito_PCA_harmony)
+SCC.B$CellType_BCells[SCC.B$patient=="1"] <- "myeloid cells" #patient 1 does not have any B-Cells
+
+SCC.B$CellType_BCells[SCC.B$seurat_clusters_BCells_SCT_PCA_harmony %in% c("9","26")] <- "cycling Immune cells" #cycling cells are clustering to fibroblasts and therefore hamper analysis
+
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="16"] <- "Tumor / ECs"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="11"] <- "myeloid cells"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="15"] <- "Fibroblasts"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="5"] <- "T-Cells"
+
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="8"] <- "Plasmablasts"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="10"] <- "Plasmablasts"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="18"] <- "Plasmablasts"
+SCC.B$CellType_BCells[SCC.B$CellType_BCells=="19"] <- "Plasmablasts"
+
+SCC.B$CellType_BCells[SCC.B$SingleR.monaco.res100 %in% c("Central memory CD8 T cells","Effector memory CD8 T cells","Follicular helper T cells","Naive CD4 T cells","T regulatory cells","Th1 cells","Th1/Th17 cells","Th2 cells")] <- "T-Cells"
+SCC.B$CellType_BCells[SCC.B$SingleR.monaco.res100 %in% c("Classical monocytes","Myeloid dendritic cells","Plasmacytoid dendritic cells")] <- "myeloid cells"
+SCC.B$CellType_BCells[SCC.B$SingleR.monaco.res100 %in% c("Progenitor cells")] <- "Fibroblasts"
+
+SCC.B$CellType_BCells[!SCC.B$CellType_BCells %in% c("Tumor / ECs","Fibroblasts","T-Cells","myeloid cells","Plasmablasts","cycling Immune cells")] <- "B-Cells"
+
+umapharmony.SCTccmito.celltypetcells <- DimPlot(SCC.B,
+                                                reduction = "humap_SCTccmito",
+                                                pt.size = 1,
+                                                label = T,
+                                                order=T,
+                                                group.by = "CellType_BCells") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-BCells-SCTccmito-UMAPharmony-CelltypeBCells-noleg.svg"),umapharmony.SCTccmito.celltypetcells + theme(legend.position = "none"), height=5, width = 5)
+umapharmony.SCTccmito.celltypetcells
+```
+
+# Save
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfilt-BCells.RData"),SCC.B)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfilt-BCells-sessionInfo.txt"))
+```

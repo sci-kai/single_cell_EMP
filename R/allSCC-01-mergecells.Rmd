@@ -1,0 +1,590 @@
+---
+title: "Merge cells"
+author: "Kai"
+date: "6th April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/alldatasets/"
+```
+
+# load all seurat objects
+
+```{r}
+#tumor cells
+#LN-MET
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/RData/patient1-tumorfilt-typeanalysis.RData")
+#cohort
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/RData/SCCfilt-epino1filt.RData")
+#Kürten
+load("~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/HPVneg_CD45n_analysis/RData/HNSCC-epifilt.RData")
+```
+
+# Merge all Cells
+
+```{r}
+patient1.tumor.new = CreateSeuratObject(counts = patient1.tumor@assays$RNA@counts)
+patient1.tumor.new$sample <- "1"
+patient1.tumor.new$patients <- "1"
+patient1.tumor.new$tumortype <- patient1.tumor$tumortype
+patient1.tumor.new$tumortype_ov <- patient1.tumor$tumortype_ov
+patient1.tumor.new$Lok <- "LN-MET"
+HNSCC.e.new = CreateSeuratObject(counts = HNSCC.e@assays$RNA@counts)
+HNSCC.e.new$sample <- HNSCC.e$patients
+HNSCC.e.new$patients <- HNSCC.e$patients
+HNSCC.e.new$Lok <- "PT"
+SCC.epino1.new = CreateSeuratObject(counts = SCC.epino1@assays$RNA@counts)
+SCC.epino1.new$sample <- SCC.epino1$sample
+SCC.epino1.new$patients <- SCC.epino1$patient
+SCC.epino1.new$Lok <- SCC.epino1$Lok
+
+SCC <- merge(x = patient1.tumor.new,
+             y = list(HNSCC.e.new,
+                      SCC.epino1.new))
+
+SCC$patients <- factor(SCC$patients,levels = sort(unique(SCC$patients)))
+SCC$Lok[SCC$Lok=="LN-MET"] <- "MET"
+SCC$Lok <- factor(SCC$Lok,levels=c("PT","MET","NA"))
+
+rm(patient1.tumor,patient1.tumor.new)
+rm(SCC.epino1,SCC.epino1.new)
+rm(HNSCC.e,HNSCC.e.new)
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(SCC) <- "RNA"
+#log-normalization for slot "data"
+SCC <- NormalizeData(SCC, 
+                     normalization.method = "LogNormalize", #default
+                     scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                     assay = "RNA",
+                     margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+SCC <- FindVariableFeatures(SCC, 
+                            assay = "RNA",
+                            selection.method = "vst", #default
+                            nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+SCC <- ScaleData(SCC,
+                 features = VariableFeatures(SCC,assay = "RNA"),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+SCC$nCount_RNA_log10 <- log10(SCC$nCount_RNA)
+SCC$nFeature_RNA_log10 <- log10(SCC$nFeature_RNA)
+
+#from Tirosh et al 2015 cell cycle genes, included in Seurat package
+#The "data" slot is always picked, based on RNA assay
+SCC <- CellCycleScoring(SCC,
+                        s.features = cc.genes.updated.2019$s.genes,
+                        g2m.features = cc.genes.updated.2019$g2m.genes, 
+                        assay="RNA")
+
+#Assign the expression of mitochondrial and housekeeping genes
+#houskeeping genes are e.g. ribosomal proteins, expressed in nearly every cell and less sensitive to high dropout.
+# relative expression of mitochondrial gene as metric for damaged cells
+SCC[["percent.mito"]] <- PercentageFeatureSet(SCC, pattern = "^MT-") 
+#read in names of housekeeper genes
+hkgenes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1) 
+# remove hkgenes that were not found (maybe not in the reference or got lost)
+hkgenes.found <- which(toupper(rownames(SCC)) %in% toupper(hkgenes))
+# sum of hk genes for each cell
+hk_per_cell <- Matrix::colSums(GetAssayData(SCC)[hkgenes.found, ] > 0)
+SCC <- AddMetaData(object = SCC, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+rm(hk_per_cell,hkgenes.found)
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+SCC <- SCTransform(SCC, 
+                   ncells = ncol(SCC),
+                   assay="RNA", #default
+                   new.assay.name = "SCT", #default; overwrites old SCT
+                   do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                   variable.features.n = 3000, #default set variable features
+                   vars.to.regress = NULL, #default optional variables to regress out
+                   do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                   do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                   return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                   seed.use = 1448145)
+```
+
+## Normalization with SCTransform and regression
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+SCC <- SCTransform(SCC, 
+                   ncells = ncol(SCC),
+                   assay="RNA", #default
+                   new.assay.name = "SCTccmito", #default; overwrites old SCT
+                   do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                   variable.features.n = 3000, #default set variable features
+                   vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                   do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                   do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                   return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                   seed.use = 1448145)
+```
+
+# Dimension reduction
+
+## PCA
+
+always based on SCT assay
+
+```{r}
+SCC <- RunPCA(SCC, 
+              npcs = 50,  #number of PCs to use
+              assay = "SCT",
+              rev.pca = F, # default, Run cell x gene matrix
+              weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+              approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+              features = VariableFeatures(SCC,assay = "SCT"), #default
+              reduction.name = "pca_SCT",
+              verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCT <- SCC@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC@assays$SCT@scale.data)[VariableFeatures(SCC,assay = "SCT"),]))
+
+PCAplot.SCT <- DimPlot(SCC, reduction = "pca_SCT", dims = c(1,2), group.by = "patients") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% of variance)")) +
+  theme_jb()
+
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+#cumulative variance plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(SCC) <- "SCT"
+#based on PCA
+SCC <- FindNeighbors(SCC, 
+                     dims = 1:numberofPCs, 
+                     reduction = "pca_SCT",
+                     assay = "SCT")
+SCC <- FindClusters(SCC, 
+                    resolution = 0.8,
+                    random.seed=100)
+
+SCC$seurat_clusters_all_SCT_PCA <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+SCC <- RunUMAP(SCC,
+               dims = 1:numberofPCs,
+               assay = "SCT",
+               umap.method = "uwot", # Seurat default
+               graph=NULL, #default
+               reduction="pca_SCT",
+               reduction.name = "umap_SCT"
+)
+```
+
+```{r}
+UMAP.SCT.clusPCA <- DimPlot(SCC, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = T, 
+                            group.by = "seurat_clusters_all_SCT_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.patients <- DimPlot(SCC, 
+                            reduction = "umap_SCT", 
+                            pt.size = 1, 
+                            label = F, 
+                            group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.Lok <- DimPlot(SCC, 
+                        reduction = "umap_SCT", 
+                        pt.size = 1, 
+                        label = F, 
+                        group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.QC <- FeaturePlot(SCC, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCT", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           order = T,
+                           slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-clusPCA.svg"),UMAP.SCT.clusPCA,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-patients.svg"),UMAP.SCT.patients,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-Lok.svg"),UMAP.SCT.Lok,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-QC.svg"),UMAP.SCT.QC,width = 5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-clusPCA-noleg.svg"),UMAP.SCT.clusPCA + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-patients-noleg.svg"),UMAP.SCT.patients + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-Lok-noleg.svg"),UMAP.SCT.Lok + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCT-UMAP-QC-noleg.svg"),UMAP.SCT.QC + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+
+UMAP.SCT.clusPCA
+UMAP.SCT.patients
+UMAP.SCT.Lok
+UMAP.SCT.QC
+```
+
+# Dimension reduction with regression
+
+## PCA
+
+always based on SCTccmito assay
+
+```{r}
+SCC <- RunPCA(SCC, 
+              npcs = 50,  #number of PCs to use
+              assay = "SCTccmito",
+              rev.pca = F, # default, Run cell x gene matrix
+              weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+              approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+              features = VariableFeatures(SCC,assay = "SCTccmito"), #default
+              reduction.name = "pca_SCTccmito",
+              verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- SCC@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC@assays$SCTccmito@scale.data)[VariableFeatures(SCC,assay = "SCTccmito"),]))
+
+PCAplot.SCTccmito <- DimPlot(SCC, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "patients") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb()
+
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                           PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+#cumulative variance plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAplot.SCTccmito
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(SCC) <- "SCTccmito"
+#based on PCA
+SCC <- FindNeighbors(SCC, 
+                     dims = 1:numberofPCs, 
+                     reduction = "pca_SCTccmito",
+                     assay = "SCTccmito")
+SCC <- FindClusters(SCC, 
+                    resolution = 0.8,
+                    random.seed=100)
+
+SCC$seurat_clusters_all_SCTccmito_PCA <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+SCC <- RunUMAP(SCC,
+               dims = 1:numberofPCs,
+               assay = "SCTccmito",
+               umap.method = "uwot", # Seurat default
+               graph=NULL, #default
+               reduction="pca_SCTccmito",
+               reduction.name = "umap_SCTccmito"
+)
+```
+
+```{r}
+UMAP.SCTccmito.clusPCA <- DimPlot(SCC, 
+                                  reduction = "umap_SCTccmito", 
+                                  pt.size = 1, 
+                                  label = T, 
+                                  group.by = "seurat_clusters_all_SCTccmito_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.patients <- DimPlot(SCC, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 1, 
+                                   label = F, 
+                                   group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.Lok <- DimPlot(SCC, 
+                              reduction = "umap_SCTccmito", 
+                              pt.size = 1, 
+                              label = F, 
+                              group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.QC <- FeaturePlot(SCC, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCTccmito", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           order = T,
+                           slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-clusPCA.svg"),UMAP.SCTccmito.clusPCA,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-patients.svg"),UMAP.SCTccmito.patients,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-Lok.svg"),UMAP.SCTccmito.Lok,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-QC.svg"),UMAP.SCTccmito.QC,width = 5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-patients-noleg.svg"),UMAP.SCTccmito.patients + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-Lok-noleg.svg"),UMAP.SCTccmito.Lok + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAP-QC-noleg.svg"),UMAP.SCTccmito.QC + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+
+UMAP.SCTccmito.clusPCA
+UMAP.SCTccmito.patients
+UMAP.SCTccmito.Lok
+UMAP.SCTccmito.QC
+```
+
+# Harmony batch correction
+
+```{r}
+library(harmony)
+set.seed(42)
+SCC <- RunHarmony(SCC,
+                  reduction="pca_SCTccmito",
+                  group.by.vars = "patients",
+                  reduction.save = "harmony_SCTccmito",
+                  plot_convergence = T,
+                  max.iter.harmony = 30,
+                  max.iter.cluster = 20,
+                  assay.use = "SCTccmito",
+                  project.dim = F)
+
+set.seed(42)
+SCC <- RunHarmony(SCC,
+                  reduction="harmony_SCTccmito",
+                  group.by.vars = "patients",
+                  reduction.save = "harmony2_SCTccmito",
+                  plot_convergence = T,
+                  max.iter.harmony = 30,
+                  max.iter.cluster = 20, 
+                  assay.use = "SCTccmito",
+                  project.dim = F)
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(SCC) <- "SCTccmito"
+#based on PCA
+SCC <- FindNeighbors(SCC, 
+                     dims = 1:numberofPCs, 
+                     reduction = "harmony2_SCTccmito",
+                     assay = "SCTccmito")
+SCC <- FindClusters(SCC, 
+                    resolution = 0.8,
+                    random.seed=100)
+
+SCC$seurat_clusters_all_SCTccmito_harmony <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+SCC <- RunUMAP(SCC,
+               dims = 1:numberofPCs,
+               assay = "SCTccmito",
+               umap.method = "uwot", # Seurat default
+               graph=NULL, #default
+               reduction="harmony2_SCTccmito",
+               reduction.name = "humap_SCTccmito"
+)
+```
+
+```{r}
+UMAPharmony.SCTccmito.clusPCA <- DimPlot(SCC, 
+                                         reduction = "humap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = T, 
+                                         group.by = "seurat_clusters_all_SCTccmito_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.patients <- DimPlot(SCC, 
+                                          reduction = "humap_SCTccmito", 
+                                          pt.size = 1, 
+                                          label = F, 
+                                          group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.Lok <- DimPlot(SCC, 
+                                     reduction = "humap_SCTccmito", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "Lok") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.QC <- FeaturePlot(SCC, 
+                                        features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                        reduction = "humap_SCTccmito", 
+                                        cols = c("grey95", "blue"),
+                                        pt.size = 1,
+                                        order = T,
+                                        slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-patients.svg"),UMAPharmony.SCTccmito.patients,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-Lok.svg"),UMAPharmony.SCTccmito.Lok,width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-QC.svg"),UMAPharmony.SCTccmito.QC,width = 5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-clusPCA-noleg.svg"),UMAPharmony.SCTccmito.clusPCA + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-patients-noleg.svg"),UMAPharmony.SCTccmito.patients + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-Lok-noleg.svg"),UMAPharmony.SCTccmito.Lok + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-QC-noleg.svg"),UMAPharmony.SCTccmito.QC + theme(legend.position = "none") + ggtitle(NULL),width = 5, height=5)
+
+UMAPharmony.SCTccmito.clusPCA
+UMAPharmony.SCTccmito.patients
+UMAPharmony.SCTccmito.Lok
+UMAPharmony.SCTccmito.QC
+```
+
+## Graph-based clustering at different resolutions for harmony corrected
+
+```{r FindClusters}
+DefaultAssay(SCC) <- "SCTccmito"
+numberofPCs = 20
+#based on harmony
+for (res in c(seq(1,4,1))) {
+  SCC <- FindNeighbors(SCC,
+                       dims = 1:numberofPCs,
+                       reduction = "harmony2_SCTccmito",
+                       assay = "SCTccmito")
+  SCC <- FindClusters(SCC,
+                      resolution = res,
+                      random.seed=100)
+  
+  SCC[[paste0("seurat_clusters_all_SCTccmito_PCA_harmony_res",res)]] <- SCC$seurat_clusters
+  SCC$seurat_clusters <- NULL
+}
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-clusPCAharmony-overview.svg"),
+       ggplot() + geom_bar(stat="identity", 
+                           mapping = aes(y=unlist(lapply(seq(1,4,1),function(res) length(table(SCC[[paste0("seurat_clusters_all_SCTccmito_PCA_harmony_res",res)]])))),x=seq(1,4,1))) +
+         labs(x="resolution",y="number of clusters") +
+         scale_y_continuous(breaks=seq(0,100,1)) +
+         scale_x_continuous(breaks=seq(0,5,1)) +
+         theme_jb(),
+       width=5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-clusPCAharmony-overviewcells.svg"),
+       ggplot() + geom_bar(stat="identity", 
+                           mapping = aes(y=unlist(lapply(seq(1,4,1),function(res) mean(table(SCC[[paste0("seurat_clusters_all_SCTccmito_PCA_harmony_res",res)]])))),x=seq(1,4,1))) +
+         labs(x="resolution",y="number of clusters") +
+         scale_x_continuous(breaks=seq(0,10,1)) +
+         scale_y_continuous(breaks=seq(0,10000,50)) +
+         theme_jb(),
+       width=5, height=5)
+
+umapharmony.SCTccmito.clusPCAharmonyres <- list()
+for (res in c(seq(1,4,1))) {
+  umapharmony.SCTccmito.clusPCAharmonyres[[as.character(res)]] <- DimPlot(SCC,
+                                                                          reduction = "humap_SCTccmito",
+                                                                          pt.size = 1,
+                                                                          label = T,
+                                                                          group.by = paste0("seurat_clusters_all_SCTccmito_PCA_harmony_res",res)) + 
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/alltumor-SCTccmito-UMAPharmony-clusPCAharmony-res",res,"-noleg.png"),umapharmony.SCTccmito.clusPCAharmonyres[[as.character(res)]] + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+}
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/alltumor.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/alltumor-sessionInfo.txt"))
+```

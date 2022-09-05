@@ -1,0 +1,984 @@
+---
+title: "HNSCC - preprocessing"
+author: "Kai"
+date: "13th January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(ggrepel)
+library(RColorBrewer)
+library(scales)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/HPVneg_CD45n_analysis/"
+```
+
+# Load files and convert to Seurat
+
+```{r load files}
+#Folder of cellranger output
+data_dir = "~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/cellranger/"
+
+HN.data <- list()
+HN <- list()
+for (sample in list.files(data_dir)[-which(list.files(data_dir)=="web_summary")]) {
+  #raw data containing gene expression
+  HN.data[[paste0(sub("raw_feature_bc_matrix_","",sample))]] <- Read10X(paste0(data_dir,sample))
+  #Setup Seurat Object for gene Expression
+  HN[[paste0(sub("raw_feature_bc_matrix_","",sample))]] <- CreateSeuratObject(HN.data[[paste0(sub("raw_feature_bc_matrix_","",sample))]],
+                                                                              project = paste0(sub("raw_feature_bc_matrix_","",sample)))
+}
+
+#Merge samples
+HNSCC <- merge(x = HN[1][[1]],
+               y = HN[-1])
+```
+
+save merged count matrix
+```{r}
+save(file=paste0(OUTPUT,"RData/mergedcounts.RData"),HNSCC)
+```
+
+# Quality control and Filtering
+
+## Assign the percentage of mitochondrial gene expression and number of expressed housekeeper genes
+
+houskeeping genes are e.g. ribosomal proteins, expressed in nearly every cell and less sensitive to high dropout.
+
+```{r}
+# relative expression of mitochondrial gene as metric for damaged cells
+HNSCC[["percent.mito"]] <- PercentageFeatureSet(HNSCC, pattern = "^MT-") 
+
+#read in names of housekeeper genes from Tirosh paper
+hkgenes <- read.table("~/tscr/kai/projects/01_SCC_scRNA/db/tirosh_house_keeping.txt", skip = 2)
+hkgenes <- as.vector(hkgenes$V1) 
+# remove hkgenes that were not found (maybe not in the reference or got lost)
+hkgenes.found <- which(toupper(rownames(HNSCC)) %in% toupper(hkgenes))
+# sum of hk genes for each cell
+hk_per_cell <- Matrix::colSums(GetAssayData(HNSCC)[hkgenes.found, ] > 0)
+HNSCC <- AddMetaData(object = HNSCC, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+rm(hk_per_cell,hkgenes.found)
+```
+
+## Quality Control
+
+We create a central dataframe with all quality metrices for every cell for easier plotting
+
+```{r calculate sequence summary}
+CreateBarcodeMetrics <- function (seuratobject,hkgenes) {
+  #Add HK and MITO expression to all  
+  seuratobject[["percent.mito"]] <- PercentageFeatureSet(seuratobject, pattern = "^MT-") 
+  hkgenes.found <- which(toupper(rownames(seuratobject)) %in% toupper(hkgenes))
+  hk_per_cell <- Matrix::colSums(GetAssayData(seuratobject)[hkgenes.found, ] > 0)
+  seuratobject <- AddMetaData(object = seuratobject, metadata = hk_per_cell, col.name = "n.exp.hkgenes")
+  data.frame(barcodes=names(seuratobject$nCount_RNA),
+             orig.ident = seuratobject$orig.ident,
+             nCount =  seuratobject$nCount_RNA,
+             nFeature = seuratobject$nFeature_RNA,
+             percent.mito = seuratobject$percent.mito,
+             n.exp.hkgenes = seuratobject$n.exp.hkgenes)
+}
+
+barcode_metrics <- CreateBarcodeMetrics(HNSCC,hkgenes)
+
+head(barcode_metrics)
+
+#remove low counts that make up most barcodes
+
+barcode_metrics <- barcode_metrics[barcode_metrics$nCount>5,]
+```
+
+### Examine: UMI counts vs Gene counts
+
+UMI and gene counts are highly correlated with each other. It is not possible to have more genes than counts (since every gene need at least one UMI count).
+
+```{r UMIvsGENE}
+UMIvsGENE.mito <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$percent.mito,
+                                colname = "percent.mito")
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsGENE-mito.svg"),UMIvsGENE.mito)
+
+#examine per batch
+UMIvsGENE.mito.s <- list()
+for (sample in unique(barcode_metrics$orig.ident)) {
+  UMIvsGENE.mito.s[[sample]] <- PlotUMIvsGENE(barcode_metrics = barcode_metrics[barcode_metrics$orig.ident==sample,],
+                                              col = barcode_metrics[barcode_metrics$orig.ident==sample,]$percent.mito,
+                                              colname = "percent.mito")
+  ggsave(filename = paste0(OUTPUT,"figs/HNSCC-",sample,"-filtering-UMIvsGENE-mito.svg"),UMIvsGENE.mito.s[[sample]])
+}
+```
+
+## Filtering Counts and Features
+
+```{r}
+#Cut-offs
+#Here you put in your respective cut-off. If you do not want to use a certain cut-off, comment out the respective line in the subsetting command AND the barcode_metrics assignment and set the value to NA
+nCount_low <- NA
+nCount_high <- NA
+nFeature_low <- 175
+nFeature_high <- NA
+
+#Subset Seurat object
+HNSCC.filt <- subset(HNSCC,
+                     #nCount_RNA > nCount_low
+                     #& nCount_RNA < nCount_high
+                     nFeature_RNA > nFeature_low 
+                     #& nFeature_RNA < nFeature_high
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$countfiltering <- NA
+barcode_metrics[barcode_metrics$nFeature > nFeature_low,]$countfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$nFeature > nFeature_low),]$countfiltering <- "background"
+```
+
+### Examine: mitochondrial gene expression and housekeeper genes vs Counts
+
+```{r mitandhkvsumi-cf}
+UMIvsGENE.mito.cf <- PlotUMIvsGENE(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                col = barcode_metrics[barcode_metrics$countfiltering=="cell",]$percent.mito,
+                                colname = "percent.mito")
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsGENE-countfilt-mito.svg"),UMIvsGENE.mito.cf)
+
+#examine per batch
+UMIvsGENE.mito.s.cf <- list()
+for (sample in unique(barcode_metrics$orig.ident)) {
+  UMIvsGENE.mito.s.cf[[sample]] <- PlotUMIvsGENE(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell" & barcode_metrics$orig.ident==sample,],
+                                              col = barcode_metrics[barcode_metrics$countfiltering=="cell" & barcode_metrics$orig.ident==sample,]$percent.mito,
+                                              colname = "percent.mito")
+  ggsave(filename = paste0(OUTPUT,"figs/HNSCC-",sample,"-filtering-UMIvsGENE-countfilt-mito.svg"),UMIvsGENE.mito.s.cf[[sample]])
+}
+```
+
+### Examine: mitochondrial gene expression vs housekeeper genes
+
+```{r mitvshk-cf}
+HKvsMITO.mito.cf <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell",],
+                                col = log10(barcode_metrics[barcode_metrics$countfiltering=="cell",]$nCount),
+                                colname = "nCount_log10")
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-HKvsMITO-countfilt-mito.svg"),HKvsMITO.mito.cf)
+
+#examine per batch
+HKvsMITO.mito.s.cf <- list()
+for (sample in unique(barcode_metrics$orig.ident)) {
+  HKvsMITO.mito.s.cf[[sample]] <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$countfiltering=="cell" & barcode_metrics$orig.ident==sample,],
+                                              col = log10(barcode_metrics[barcode_metrics$countfiltering=="cell" & barcode_metrics$orig.ident==sample,]$nCount),
+                                              colname = "nCount_log10")
+  ggsave(filename = paste0(OUTPUT,"figs/HNSCC-",sample,"-filtering-HKvsMITO-countfilt-mito.svg"),HKvsMITO.mito.s.cf[[sample]])
+}
+```
+
+## Filtering with mitochondrial and housekeeper genes
+
+```{r}
+percent.mito_high <- 10
+n.exp.hkgenes_low <- 60
+
+#make sure, you also enable the nCount and Feature filter here!
+HNSCC.filt <- subset(HNSCC,
+                     nFeature_RNA > nFeature_low 
+                     & percent.mito < percent.mito_high 
+                     & n.exp.hkgenes > n.exp.hkgenes_low
+)
+
+#assign which barcodes were kept in filtering
+barcode_metrics$manualfiltering <- NA
+barcode_metrics[barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                barcode_metrics$percent.mito < percent.mito_high &
+                #barcode_metrics$nCount < nCount_high & 
+                barcode_metrics$nFeature > nFeature_low
+                #barcode_metrics$nFeature < nFeature_high &
+                ,]$manualfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$n.exp.hkgenes > n.exp.hkgenes_low & 
+                  barcode_metrics$percent.mito < percent.mito_high &
+                  #barcode_metrics$nCount < nCount_high & 
+                  barcode_metrics$nFeature > nFeature_low
+                  #barcode_metrics$nFeature < nFeature_high &
+                  ),]$manualfiltering <- "background"
+
+#assign in barcode metrics filtering from kuerten
+barcode_metrics$kuertenfiltering <- NA
+barcode_metrics[barcode_metrics$percent.mito < 10 &
+                barcode_metrics$nFeature > 200 &
+                barcode_metrics$nFeature < 5000
+                ,]$kuertenfiltering <- "cell" 
+barcode_metrics[!(barcode_metrics$percent.mito < 10 &
+                  barcode_metrics$nFeature > 200 &
+                  barcode_metrics$nFeature < 5000
+                  ),]$kuertenfiltering <- "background"
+```
+
+After filtering for those, we examine what is filtered and whats not filtered.
+
+### Examine: UMI counts vs gene counts after filtering
+
+```{r umivsgene-afterfilt}
+#All barcodes, colored by filtered cells with minimum count and feature numbers
+UMIvsGENE.filt <- PlotUMIvsGENE(barcode_metrics = barcode_metrics,
+                                col = barcode_metrics$manualfiltering,
+                                colname = "cells filtered", 
+                                xintercept = log10(c(nCount_low,nCount_high)), 
+                                yintercept = log10(c(nFeature_low,nFeature_high))) 
+
+#only cell barcodes, colored by percent.mito
+UMIvsGENE.cells.mito <- PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                      col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+# only NOT cells
+UMIvsGENE.notcells.mito <-  PlotUMIvsGENE(barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                      col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                      colname = "percent.mito",
+                                      xintercept = log10(c(nCount_low,nCount_high)),
+                                      yintercept = log10(c(nFeature_low,nFeature_high)))
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsGENE-filt.svg"),UMIvsGENE.filt)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsGENE-cells-mito.svg"),UMIvsGENE.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsGENE-notcells-mito.svg"),UMIvsGENE.notcells.mito)
+```
+
+### Examine: mitochondrial gene expression and housekeeper genes vs Counts after filtering
+
+```{r mitandhkvsumi-afterfilt}
+#all barcodes, colored by cells
+UMIvsMITO.filt <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics,
+                                 col = barcode_metrics$manualfiltering,
+                                 colname = "cells filtered",
+                                 xintercept = log10(c(nCount_low,nCount_high)),
+                                 yintercept = percent.mito_high)
+#only cells
+UMIvsMITO.cells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                     col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$n.exp.hkgenes,
+                                     colname = "n.exp.hkgenes",
+                                     xintercept = log10(c(nCount_low,nCount_high)),
+                                     yintercept = percent.mito_high) 
+#only not cells
+UMIvsMITO.notcells.hk <-  PlotUMIvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                        col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$n.exp.hkgenes,
+                                        colname = "n.exp.hkgenes",
+                                        xintercept = log10(c(nCount_low,nCount_high)),
+                                        yintercept = percent.mito_high) 
+
+#all barcodes, colored by cells
+UMIvsHK.filt <-  PlotUMIvsHK(barcode_metrics = barcode_metrics,
+                             col = barcode_metrics$manualfiltering,
+                             colname = "cell",
+                             xintercept = log10(c(nCount_low,nCount_high)),
+                             yintercept = n.exp.hkgenes_low)
+#only cells
+UMIvsHK.cells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                  col = barcode_metrics[barcode_metrics$manualfiltering == "cell",]$percent.mito,
+                                  colname = "percent.mito",
+                                  xintercept = log10(c(nCount_low,nCount_high)),
+                                  yintercept = n.exp.hkgenes_low) 
+
+#only not cells
+UMIvsHK.notcells.mito <- PlotUMIvsHK(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                  col = barcode_metrics[barcode_metrics$manualfiltering != "cell",]$percent.mito,
+                                  colname = "percent.mito",
+                                  xintercept = log10(c(nCount_low,nCount_high)),
+                                  yintercept = n.exp.hkgenes_low) 
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsMITO-filt.svg"),UMIvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsMITO-cells-hk.svg"),UMIvsMITO.cells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsMITO-notcells-hk.svg"),UMIvsMITO.notcells.hk)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsHK-filt.svg"),UMIvsHK.filt)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsHK-cells-mito.svg"),UMIvsHK.cells.mito)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-UMIvsHK-notcells-mito.svg"),UMIvsHK.notcells.mito)
+```
+
+### Examine: percent.mito vs n.exp.hkgenes after filtering
+
+```{r HKvsMITO-afterfilt}
+#all barcodes, colored by filtering
+HKvsMITO.filt <- PlotHKvsMITO(barcode_metrics = barcode_metrics,
+                              col = barcode_metrics$manualfiltering,
+                              colname = "cell",
+                              xintercept = n.exp.hkgenes_low,
+                              yintercept = percent.mito_high)
+
+#only cells, colored by nCounts
+HKvsMITO.cells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering == "cell",],
+                                   col = log10(barcode_metrics[barcode_metrics$manualfiltering == "cell",]$nCount),
+                                   colname = "nCount_log10",
+                                   xintercept = n.exp.hkgenes_low, 
+                                   yintercept = percent.mito_high)
+
+#only NOT cells, colored by nCounts
+HKvsMITO.notcells.UMI <- PlotHKvsMITO(barcode_metrics = barcode_metrics[barcode_metrics$manualfiltering != "cell",],
+                                   col = log10(barcode_metrics[barcode_metrics$manualfiltering != "cell",]$nCount),
+                                   colname = "nCount_log10",
+                                   xintercept = n.exp.hkgenes_low, 
+                                   yintercept = percent.mito_high)
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-HKvsMITO-filt.svg"),HKvsMITO.filt)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-HKvsMITO-cells-UMI.svg"),HKvsMITO.cells.UMI)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-filtering-HKvsMITO-notcells-UMI.svg"),HKvsMITO.notcells.UMI)
+```
+
+#save unnormalized, filtered object
+
+```{r}
+save(file=paste0(OUTPUT,"RData/HNSCC_unnorm.RData"),HNSCC.filt)
+```
+
+# Normalization
+
+# Normalization of RNA assay
+
+```{r}
+#log-normalization for slot "data"
+HNSCC.filt <- NormalizeData(HNSCC.filt, 
+                            normalization.method = "LogNormalize", #default
+                            scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                            assay = "RNA",
+                            margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+HNSCC.filt <- FindVariableFeatures(HNSCC.filt, 
+                                   assay = "RNA",
+                                   selection.method = "vst", #default
+                                   nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data" by ALL genes, not only most variable ones
+HNSCC.filt <- ScaleData(HNSCC.filt,
+                        features = VariableFeatures(HNSCC.filt,assay = "RNA"),
+                        do.scale = T,
+                        do.center = T,
+                        scale.max = 10, #maximum value for scaling standard deviation, can cause that means are not exactly zero (https://github.com/satijalab/seurat/issues/1166)
+                        assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+HNSCC.filt <- CellCycleScoring(HNSCC.filt,
+                               s.features = cc.genes.updated.2019$s.genes,
+                               g2m.features = cc.genes.updated.2019$g2m.genes, 
+                               assay="RNA")
+```
+
+# Normalization using SCTransform
+
+```{r}
+HNSCC.filt <- SCTransform(HNSCC.filt, 
+                          ncells=ncol(HNSCC.filt), #default  
+                          assay="RNA", #default
+                          new.assay.name = "SCT", #default
+                          do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                          variable.features.n = 3000, #default set variable features
+                          vars.to.regress = NULL, #default optional variables to regress out
+                          do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                          do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                          return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                          seed.use = 1448145)
+```
+
+Cell cycle regression
+
+```{r}
+HNSCC.filt <- SCTransform(HNSCC.filt, 
+                          ncells=ncol(HNSCC.filt), #default  
+                          assay="RNA", #default
+                          new.assay.name = "SCTccmito", #default
+                          do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                          variable.features.n = 3000, #default set variable features
+                          vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                          do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                          do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                          return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                          seed.use = 1448145)
+```
+
+# save normalized data
+
+```{r}
+save(file = paste0(OUTPUT,"RData/HNSCC_norm.RData"), HNSCC.filt)
+```
+
+# Add certain annotation columns
+
+```{r}
+HNSCC.filt$patients <- HNSCC.filt$orig.ident
+HNSCC.filt$nCount_RNA_log10 <- log10(HNSCC.filt$nCount_RNA)
+HNSCC.filt$nFeature_RNA_log10 <- log10(HNSCC.filt$nFeature_RNA)
+
+metadata_patients <- read.csv("~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/information/metadata_patients.csv")
+names(metadata_patients) <- c("patient","Inflammation.score","HPV","Inflammation.status")
+
+HNSCC.filt$Inflammation.score <- HNSCC.filt$patients
+HNSCC.filt$HPV <- HNSCC.filt$patients
+HNSCC.filt$Inflammation.status <- HNSCC.filt$patients
+for (pat in unique(HNSCC.filt$patients)) {
+  HNSCC.filt$Inflammation.score[HNSCC.filt$patients==pat] <- metadata_patients[metadata_patients$patient==pat,"Inflammation.score"]
+  HNSCC.filt$HPV[HNSCC.filt$patients==pat] <- metadata_patients[metadata_patients$patient==pat,"HPV"]
+  HNSCC.filt$Inflammation.status[HNSCC.filt$patients==pat] <- metadata_patients[metadata_patients$patient==pat,"Inflammation.status"]
+}
+```
+
+# Dimensionality Reduction and Clustering
+
+## Principal Component Analysis (first 50 PCs)
+
+```{r PCA, fig.height=6, fig.width=6}
+HNSCC.filt <- RunPCA(HNSCC.filt,
+                     npcs = 50, 
+                     assay = "SCT",
+                     rev.pca = F, # default, Run cell x gene matrix
+                     weight.by.var = T, #default, Weight cell embedding by variance of each PC
+                     approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar to PCs. Beware, that approx=F has an error in calculating PCs in optimized Seurat version!
+                     features = VariableFeatures(HNSCC.filt,assay = "SCT"), #default
+                     reduction.name = "pca_SCT",
+                     verbose = F)
+```
+
+```{r PCA}
+#calculate the % variance explained
+PCAvar.SCT <- HNSCC.filt@reductions$pca_SCT@stdev^2 / sum(matrixStats::rowVars(as.matrix(HNSCC.filt@assays$SCT@scale.data)[VariableFeatures(HNSCC.filt,assay = "SCT"),]))
+
+#PCA plot
+PCAplot.SCT <- DimPlot(HNSCC.filt, reduction = "pca_SCT", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCT[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCT[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCT <- ggplot(data=data.frame(var=PCAvar.SCT,
+                                           PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCT <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCT),PC=1:length(PCAvar.SCT))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA.svg"),PCAplot.SCT, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA-noleg.svg"),PCAplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA-elbow.svg"),PCAelbowplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA-elbow-noleg.svg"),PCAelbowplot.SCT + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA-variancesum.svg"),PCAsumplot.SCT, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-PCA-variancesum-noleg.svg"),PCAsumplot.SCT + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+PCAplot.SCT
+PCAelbowplot.SCT
+PCAsumplot.SCT
+```
+
+## Graph-based Clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(HNSCC.filt) <- "SCT"
+HNSCC.filt <- FindNeighbors(HNSCC.filt,
+                            dims = 1:numberofPCs,
+                            reduction = "pca_SCT",
+                            assay = "SCT")
+HNSCC.filt <- FindClusters(HNSCC.filt,
+                           resolution = 0.8,
+                           random.seed = 100)
+
+HNSCC.filt$seurat_clusters_all_PCA_SCT <- HNSCC.filt$seurat_clusters
+HNSCC.filt$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+HNSCC.filt <- RunUMAP(HNSCC.filt,
+                      dims = 1:numberofPCs,
+                      assay = "SCT",
+                      umap.method = "uwot", #default
+                      graph=NULL, #default
+                      reduction="pca_SCT",
+                      reduction.name = "umap_SCT")
+```
+
+```{r}
+UMAP.SCT.clus <- DimPlot(HNSCC.filt, 
+                         reduction = "umap_SCT", 
+                         pt.size = 1, 
+                         label = T, 
+                         group.by = "seurat_clusters_all_PCA_SCT") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.patients <- DimPlot(HNSCC.filt, 
+                             reduction = "umap_SCT", 
+                             pt.size = 1, 
+                             label = F, 
+                             group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.infstatus <- DimPlot(HNSCC.filt, 
+                              reduction = "umap_SCT", 
+                              pt.size = 1, 
+                              label = F, 
+                              group.by = "Inflammation.status") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCT.QC <- FeaturePlot(HNSCC.filt, 
+                           features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                           reduction = "umap_SCT", 
+                           cols = c("grey95", "blue"),
+                           pt.size = 1,
+                           ncol = 2,
+                           order = T,
+                           slot = "data")
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-QC.svg"),UMAP.SCT.QC, width=10, height=15)
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-clus.svg"),UMAP.SCT.clus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-clus-noleg.svg"),UMAP.SCT.clus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-patients.svg"),UMAP.SCT.patients, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-patients-noleg.svg"),UMAP.SCT.patients + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-infstatus.svg"),UMAP.SCT.infstatus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-infstatus-noleg.svg"),UMAP.SCT.infstatus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+
+UMAP.SCT.QC
+UMAP.SCT.clus
+UMAP.SCT.patients
+UMAP.SCT.infstatus
+```
+
+## Harmony
+
+```{r}
+library(harmony)
+set.seed(42)
+HNSCC.filt <- RunHarmony(HNSCC.filt,
+                         reduction="pca_SCT",
+                         group.by.vars = "patients",
+                         reduction.save = "harmony_SCT",
+                         plot_convergence = T,
+                         max.iter.harmony = 30,
+                         assay.use = "SCT",
+                         project.dim = F)
+```
+
+## Graph-based Clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+HNSCC.filt <- FindNeighbors(HNSCC.filt,
+                            dims = 1:numberofPCs,
+                            reduction = "harmony_SCT",
+                            assay = "SCT")
+HNSCC.filt <- FindClusters(HNSCC.filt,
+                           resolution = 0.8,
+                           random.seed = 100)
+
+HNSCC.filt$seurat_clusters_all_harmony_SCT <- HNSCC.filt$seurat_clusters
+HNSCC.filt$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+HNSCC.filt <- RunUMAP(HNSCC.filt,
+                      dims = 1:numberofPCs,
+                      assay = "SCT",
+                      umap.method = "uwot", #default
+                      graph=NULL, #default
+                      reduction="harmony_SCT",
+                      reduction.name = "humap_SCT",
+                      reduction.key = "humap_SCT")
+```
+
+
+```{r}
+UMAPharmony.SCT.clus <- DimPlot(HNSCC.filt,
+                                reduction = "humap_SCT",
+                                pt.size = 1,
+                                label = T,
+                                group.by = "seurat_clusters_all_harmony_SCT") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCT.patients <- DimPlot(HNSCC.filt,
+                                    reduction = "humap_SCT",
+                                    pt.size = 1,
+                                    label = F,
+                                    group.by = "patients") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCT.infstatus <- DimPlot(HNSCC.filt, 
+                                     reduction = "humap_SCT", 
+                                     pt.size = 1, 
+                                     label = F, 
+                                     group.by = "Inflammation.status") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAPharmony.SCT.QC <- FeaturePlot(HNSCC.filt,
+                                  features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"),
+                                  reduction = "humap_SCT",
+                                  cols = c("grey95", "blue"),
+                                  pt.size = 1,
+                                  ncol = 2,
+                                  order = T,
+                                  slot = "data")
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-QC.svg"),UMAPharmony.SCT.QC, width=10, height=15)
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-clus.svg"),UMAPharmony.SCT.clus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-clus-noleg.svg"),UMAPharmony.SCT.clus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-patients.svg"),UMAPharmony.SCT.patients, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-patients-noleg.svg"),UMAPharmony.SCT.patients + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-infstatus.svg"),UMAPharmony.SCT.infstatus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-infstatus-noleg.svg"),UMAPharmony.SCT.infstatus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+
+UMAPharmony.SCT.QC
+UMAPharmony.SCT.clus
+UMAPharmony.SCT.patients
+UMAPharmony.SCT.infstatus
+```
+
+# Cell cycle and mitochondrial regression
+
+## Principal Component Analysis (first 50 PCs)
+
+```{r PCA, fig.height=6, fig.width=6}
+HNSCC.filt <- RunPCA(HNSCC.filt,
+                     npcs = 50, 
+                     assay = "SCTccmito",
+                     rev.pca = F, # default, Run cell x gene matrix
+                     weight.by.var = T, #default, Weight cell embedding by variance of each PC
+                     approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar to PCs. Beware, that approx=F has an error in calculating PCs in optimized Seurat version!
+                     features = VariableFeatures(HNSCC.filt,assay = "SCTccmito"), #default
+                     reduction.name = "pca_SCTccmito",
+                     verbose = F)
+```
+
+```{r PCA}
+#calculate the % variance explained
+PCAvar.SCTccmito <- HNSCC.filt@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(HNSCC.filt@assays$SCTccmito@scale.data)[VariableFeatures(HNSCC.filt,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(HNSCC.filt, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% variance)")) +
+  theme_jb()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                           PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative Variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+# without legends
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL),width = 5, height = 5)
+PCAplot.SCTccmito
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+```
+
+## Graph-based Clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(HNSCC.filt) <- "SCTccmito"
+
+HNSCC.filt <- FindNeighbors(object = HNSCC.filt,
+                            dims = 1:numberofPCs,
+                            reduction = "pca_SCTccmito",
+                            assay = "SCTccmito")
+HNSCC.filt <- FindClusters(HNSCC.filt,
+                           resolution = 0.8,
+                           random.seed = 100)
+
+HNSCC.filt$seurat_clusters_all_SCTccmito_PCA <- HNSCC.filt$seurat_clusters
+HNSCC.filt$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+HNSCC.filt <- RunUMAP(HNSCC.filt,
+                      dims = 1:numberofPCs,
+                      assay = "SCTccmito",
+                      umap.method = "uwot", #default
+                      graph=NULL, #default
+                      reduction="pca_SCTccmito",
+                      reduction.name = "umap_SCTccmito",
+                      reduction.key = "umap_SCTccmito")
+```
+
+```{r}
+UMAP.SCTccmito.clus <- DimPlot(HNSCC.filt, 
+                               reduction = "umap_SCTccmito", 
+                               pt.size = 1, 
+                               label = T, 
+                               group.by = "seurat_clusters_all_SCTccmito_PCA") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.patients <- DimPlot(HNSCC.filt, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 1, 
+                                   label = F, 
+                                   group.by = "patients") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.infstatus <- DimPlot(HNSCC.filt, 
+                                    reduction = "umap_SCTccmito", 
+                                    pt.size = 1, 
+                                    label = F, 
+                                    group.by = "Inflammation.status") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.QC <- FeaturePlot(HNSCC.filt, 
+                                 features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                 reduction = "umap_SCTccmito", 
+                                 cols = c("grey95", "blue"),
+                                 pt.size = 1,
+                                 ncol = 2,
+                                 order = T,
+                                 slot = "data")
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-QC.svg"),UMAP.SCTccmito.QC, width=10, height=15)
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-clus.svg"),UMAP.SCTccmito.clus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-clus-noleg.svg"),UMAP.SCTccmito.clus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-patients.svg"),UMAP.SCTccmito.patients, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-patients-noleg.svg"),UMAP.SCTccmito.patients + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-infstatus.svg"),UMAP.SCTccmito.infstatus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-infstatus-noleg.svg"),UMAP.SCTccmito.infstatus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+
+UMAP.SCTccmito.QC
+UMAP.SCTccmito.clus
+UMAP.SCTccmito.patients
+UMAP.SCTccmito.infstatus
+```
+
+## Harmony
+
+```{r}
+set.seed(42)
+HNSCC.filt <- RunHarmony(HNSCC.filt,
+                         reduction="pca_SCTccmito",
+                         group.by.vars = "patients",
+                         reduction.save = "harmony_SCTccmito",
+                         plot_convergence = T,
+                         max.iter.harmony = 30,
+                         assay.use = "SCTccmito",
+                         project.dim = F)
+```
+
+## Graph-based Clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+DefaultAssay(HNSCC.filt) <- "SCTccmito"
+
+HNSCC.filt <- FindNeighbors(object = HNSCC.filt,
+                            dims = 1:numberofPCs,
+                            reduction = "harmony_SCTccmito",
+                            assay = "SCTccmito")
+HNSCC.filt <- FindClusters(HNSCC.filt,
+                           resolution = 0.8,
+                           random.seed = 100)
+
+HNSCC.filt$seurat_clusters_all_SCTccmito_harmony <- HNSCC.filt$seurat_clusters
+HNSCC.filt$seurat_clusters <- NULL
+```
+
+## UMAP
+
+```{r UMAP, fig.width=10, fig.height=8}
+HNSCC.filt <- RunUMAP(HNSCC.filt,
+                      dims = 1:numberofPCs,
+                      assay = "SCTccmito",
+                      umap.method = "uwot", #default
+                      graph=NULL, #default
+                      reduction="harmony_SCTccmito",
+                      reduction.name = "humap_SCTccmito",
+                      reduction.key = "humap_SCTccmito")
+```
+
+```{r}
+UMAPharmony.SCTccmito.clus <- DimPlot(HNSCC.filt, 
+                                reduction = "humap_SCTccmito", 
+                                pt.size = 1, 
+                                label = T, 
+                                group.by = "seurat_clusters_all_SCTccmito_harmony") + 
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.patients <- DimPlot(HNSCC.filt, 
+                                    reduction = "humap_SCTccmito", 
+                                    pt.size = 1, 
+                                    label = F, 
+                                    group.by = "patients") + 
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.infstatus <- DimPlot(HNSCC.filt, 
+                                           reduction = "humap_SCTccmito", 
+                                           pt.size = 1, 
+                                           label = F, 
+                                           group.by = "Inflammation.status") + 
+  theme_jb_nogrid()
+
+UMAPharmony.SCTccmito.QC <- FeaturePlot(HNSCC.filt, 
+                                        features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                        reduction = "humap_SCTccmito", 
+                                        cols = c("grey95", "blue"),
+                                        pt.size = 1,
+                                        ncol = 2,
+                                        order = T,
+                                        slot = "data")
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-QC.svg"),UMAPharmony.SCTccmito.QC, width=10, height=15)
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-clus.svg"),UMAPharmony.SCTccmito.clus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-clus-noleg.svg"),UMAPharmony.SCTccmito.clus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-patients.svg"),UMAPharmony.SCTccmito.patients, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-patients-noleg.svg"),UMAPharmony.SCTccmito.patients + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-infstatus.svg"),UMAPharmony.SCTccmito.infstatus, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-infstatus-noleg.svg"),UMAPharmony.SCTccmito.infstatus + theme(legend.position = "none") + ggtitle(""), width = 5, height = 5)
+
+UMAPharmony.SCTccmito.QC
+UMAPharmony.SCTccmito.clus
+UMAPharmony.SCTccmito.patients
+UMAPharmony.SCTccmito.infstatus
+```
+
+# Cell type identification
+
+## Marker gene expression
+
+```{r FeatPlot_T-cellmarker}
+#UMAP
+UMAP.SCT.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(HNSCC.filt,celltypemarkers[[x]],reduction = "umap_SCT"))
+names(UMAP.SCT.marker) <- names(celltypemarkers)
+lapply(names(UMAP.SCT.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-marker-",x,".png"),UMAP.SCT.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+#UMAP
+UMAP.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(HNSCC.filt,celltypemarkers[[x]],reduction = "umap_SCTccmito"))
+names(UMAP.SCTccmito.marker) <- names(celltypemarkers)
+lapply(names(UMAP.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-marker-",x,".png"),UMAP.SCTccmito.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+#UMAPharmony
+UMAPharmony.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(HNSCC.filt,celltypemarkers[[x]],reduction = "humap_SCTccmito"))
+names(UMAPharmony.SCTccmito.marker) <- names(celltypemarkers)
+lapply(names(UMAPharmony.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-marker-",x,".png"),UMAPharmony.SCTccmito.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+```
+
+## Celltype Annotation
+
+```{r umap-celltype}
+Idents(HNSCC.filt) <- HNSCC.filt$seurat_clusters_all_SCTccmito_PCA
+HNSCC.filt <- RenameIdents(HNSCC.filt,
+                           "0" = "ECs",
+                           "1" = "Fibroblasts",
+                           "2" = "ECs",
+                           "3" = "Epithelial",
+                           "4" = "T-Cells",
+                           "5" = "Epithelial",
+                           "6" = "T-Cells",
+                           "7" = "T-Cells",
+                           "8" = "ECs",
+                           "9" = "Macrophages",
+                           "10" = "T-Cells",
+                           "11" = "Epithelial",
+                           "12" = "Epithelial",
+                           "13" = "Pericytes",
+                           "14" = "Fibroblasts",
+                           "15" = "Macrophages",
+                           "16" = "cDCs",
+                           "17" = "Epithelial",
+                           "18" = "T-Cells",
+                           "19" = "B-Cells",
+                           "20" = "Fibroblasts",
+                           "21" = "ECs",
+                           "22" = "Fibroblasts"
+)
+HNSCC.filt$CellType_SCTccmito_PCA <- Idents(HNSCC.filt)
+```
+
+```{r}
+UMAP.SCT.celltype <- DimPlot(HNSCC.filt,
+                             reduction = "umap_SCT",
+                             pt.size = 1,
+                             label = T,
+                             group.by = "CellType_SCTccmito_PCA") +
+  theme_jb_nogrid()
+UMAPharmony.SCT.celltype <- DimPlot(HNSCC.filt,
+                                    reduction = "humap_SCT",
+                                    pt.size = 1,
+                                    label = T,
+                                    group.by = "CellType_SCTccmito_PCA") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.celltype <- DimPlot(HNSCC.filt,
+                                   reduction = "umap_SCTccmito",
+                                   pt.size = 1,
+                                   label = T,
+                                   group.by = "CellType_SCTccmito_PCA") +
+  theme_jb_nogrid() +
+  labs(x="UMAP_1",y="UMAP_2",title = NULL)
+UMAPharmony.SCTccmito.celltype <- DimPlot(HNSCC.filt,
+                                          reduction = "humap_SCTccmito",
+                                          pt.size = 1,
+                                          label = T,
+                                          group.by = "CellType_SCTccmito_PCA") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-celltype.svg"),UMAP.SCT.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAP-celltype-noleg.svg"),UMAP.SCT.celltype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-celltype.svg"),UMAPharmony.SCT.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCT-UMAPharmony-celltype-noleg.svg"),UMAPharmony.SCT.celltype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-celltype.svg"),UMAP.SCTccmito.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAP-celltype-noleg.svg"),UMAP.SCTccmito.celltype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-celltype.svg"),UMAPharmony.SCTccmito.celltype, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/HNSCC-allmito-SCTccmito-UMAPharmony-celltype-noleg.svg"),UMAPharmony.SCTccmito.celltype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+
+UMAP.SCT.celltype
+UMAPharmony.SCT.celltype
+UMAP.SCTccmito.celltype
+UMAPharmony.SCTccmito.celltype
+```
+
+#Save
+
+```{r}
+#save Seurat Object
+save(file = paste0(OUTPUT,"RData/HNSCC-filt.RData"),HNSCC.filt)
+#sessioninfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/HNSCC-allmito-sessionInfo.txt"))
+```

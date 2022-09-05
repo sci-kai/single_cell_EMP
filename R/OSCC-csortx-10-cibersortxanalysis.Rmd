@@ -1,0 +1,331 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "10th May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries and set OUTPUT
+
+```{r}
+library(ggplot2)
+library(ComplexHeatmap)
+library(Seurat)
+library(DESeq2)
+library(vsn)
+library(ggrepel)
+library(edgeR)
+source("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R")
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/HTGEdgeSeq/cibersortx/zoom0/"
+
+#Load data
+#load raw counts matrix from bulkRNA
+counts <- read.csv("~/tscr/Allgemeine Daten/HTG edgeSEq/220622_OSCC_HTP_WTpanel/220622_NB551534_0128_AHNNVYBGXL/ParsedData_lauf2.csv", row.names=1,header = T)
+```
+
+# Quality control
+
+```{r}
+#QC metrics
+QCdata <- read.csv("~/tscr/Allgemeine Daten/HTG edgeSEq/220622_OSCC_HTP_WTpanel/reveal/QCdata.csv", row.names=1)
+QCdata <- QCdata[sampleorder,]
+
+#Plot QC metric data
+#QC0
+ggsave(filename = paste0(OUTPUT,"figs/QC0.svg"),
+       ggplot(data=QCdata,
+              mapping = aes(x=rownames(QCdata),
+                            y=Percent.POS,
+                            col=QC.Status)) +
+         geom_point(size=2) +
+         geom_hline(yintercept = 0.04) +
+         coord_cartesian(ylim = c(0,100)) +
+         scale_color_manual(values = c("black","blue","red","green")) +
+         labs(y="Percent of reads allocated to POS",x="sample") +
+         ggtitle("QC0") +
+         theme_jb(),
+       height = 5,width = 8)
+
+#QC1
+ggsave(filename = paste0(OUTPUT,"figs/QC1.svg"),
+       ggplot(data=QCdata,
+              mapping = aes(x=rownames(QCdata),
+                            y=log10(Total.Counts),
+                            col=QC.Status)) +
+         geom_point(size=2) +
+         coord_cartesian(ylim = c(0,8)) +
+         geom_hline(yintercept = 7) + 
+         scale_color_manual(values = c("black","blue","red","green")) +
+         labs(y="log10(Total Reads)",x="sample") +
+         ggtitle("QC1") +
+         theme_jb(),
+       height = 5,width = 8)
+
+#QC2
+ggsave(filename = paste0(OUTPUT,"figs/QC2.svg"),
+       ggplot(data=QCdata,
+              mapping = aes(x=rownames(QCdata),
+                            y=Median.log2.CPM..NEG,
+                            col=QC.Status)) +
+         geom_point(size=2) +
+         geom_hline(yintercept = 2) + 
+         scale_color_manual(values = c("black","blue","red","green")) +
+         labs(y="Median log2(CPM) NEG probes",x="sample") +
+         ggtitle("QC2") +
+         theme_jb(),
+       height = 5,width = 8)
+
+#QC3
+ggsave(filename = paste0(OUTPUT,"figs/QC3.svg"),
+       ggplot(data=QCdata,
+              mapping = aes(x=rownames(QCdata),
+                            y=Adjusted.gDNA.Counts,
+                            col=QC.Status)) +
+         geom_point(size=2) +
+         geom_hline(yintercept = 1) + 
+         scale_color_manual(values = c("black","blue","red","green")) +
+         labs(y="Adjusted gDNA Counts",x="sample") +
+         ggtitle("QC3") +
+         theme_jb(),
+       height = 5,width = 8)
+```
+
+# format raw count matrix
+
+```{r}
+#Preprocessing
+colnames(counts) <- counts["Sample Name",]
+counts.f <- counts[-c(1:4,grep("NC-",rownames(counts)),grep("POS-",rownames(counts)),grep("GDNA-",rownames(counts)),grep("ERCC-",rownames(counts))),]
+counts.mat <- apply(counts.f,2,as.numeric)
+rownames(counts.mat) <- rownames(counts.f)
+
+#since sample 5 failed QC we removed this sample from subsequent analysis
+counts.mat <- counts.mat[,which(colnames(counts.mat)!="5")]
+
+# prepare input for cibersortx website
+
+#normalize to CPM
+cpm.mat <- cpm(counts.mat)
+cpms <- rbind(c("Gene",colnames(counts)),cbind(rownames(counts),cpm.mat))
+
+#format to txt 
+write.table(x = cpms,file = "~/tscr/kai/projects/01_SCC_scRNA/results/HTGEdgeSeq/cibersortx/cpms.txt",quote = F,sep = "\t",row.names = F,col.names = F)
+```
+
+### single cell RNA sequencing
+
+```{r eval=FALSE, include=FALSE}
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/RData/SCCfiltnod.RData")
+#extract RNAcounts
+RNAcounts <- SCC@assays$RNA@counts
+
+#filter for genes
+genesmore5 <- lapply(unique(SCC$CellType_SCTccmito_harmony_zoom0),function(x) {
+  RNAcounts.ct <- RNAcounts[,names(SCC$CellType_SCTccmito_harmony_zoom0[SCC$CellType_SCTccmito_harmony_zoom0==x])]
+  #sum((rowSums(RNAcounts.ct>0) / ncol(RNAcounts.ct))>0.05) #get number of genes per phenoty
+  rownames(RNAcounts.ct)[(rowSums(RNAcounts.ct>0) / ncol(RNAcounts.ct))>0.05] #get genes
+})
+names(genesmore5) <- unique(SCC$CellType_SCTccmito_harmony_zoom0)
+
+#filter for cells
+#subset T-cells to reduce size
+Tcelltypes <- grep("T-Cells",unique(SCC$CellType_SCTccmito_harmony_zoom0),value = T)
+Bcelltypes <- grep("B-Cells",unique(SCC$CellType_SCTccmito_harmony_zoom0),value = T)
+Icelltypes <- c(Tcelltypes,Bcelltypes)
+
+set.seed(42)
+cellstokeep <- lapply(Icelltypes, function(x) names(sample(SCC$CellType_SCTccmito_harmony_zoom0[SCC$CellType_SCTccmito_harmony_zoom0==x],replace = F,size = length(SCC$CellType_SCTccmito_harmony_zoom0[SCC$CellType_SCTccmito_harmony_zoom0==x])*0.75)))
+
+RNAcounts.red2 <- RNAcounts[unique(unlist(genesmore5)),c(names(SCC$CellType_SCTccmito_harmony_zoom0[!SCC$CellType_SCTccmito_harmony_zoom0 %in% Icelltypes]),unlist(cellstokeep))]
+
+RNAcounts.red2 <- as.matrix(RNAcounts.red2)
+
+#with zoom 0 celltypes
+colnames(RNAcounts.red2) <- SCC$CellType_SCTccmito_harmony_zoom0[colnames(RNAcounts.red2)]
+
+write.table(x = RNAcounts.red2,file = "~/tscr/kai/projects/01_SCC_scRNA/results/HTGEdgeSeq/cibersortx/zoom0.txt",quote = F,sep = "\t",row.names = T,col.names = T)
+
+#manually add "GeneSymbol" in first row for first column annotation
+```
+
+### Load data
+
+```{r}
+#signature matrix
+sigmat <- read.delim(paste0(OUTPUT,"220811_sigmatrix_run1/CIBERSORTx_Job1_zoom0_inferred_phenoclasses.CIBERSORTx_Job1_zoom0_inferred_refsample.bm.K999.txt"), row.names=1,check.names = F)
+#cell fractions
+cellfrac.data <- read.csv(paste0(OUTPUT,"220816_cellfrac_nobatch_rel_500perm/CIBERSORTx_Job11_Results.csv"), row.names=1,check.names = F)
+
+# Remove patient 5 as this sample failed QC and is not reliable due to low coverage
+cellfrac.data <- cellfrac.data[-which(rownames(cellfrac.data)=="5"),]
+#also remove lymph nodes without tumor content since we focus on samples with tumors for this publication
+cellfrac.data <- cellfrac.data[-which(rownames(cellfrac.data) %in% c("4.3","6.3","6.5","6.6","7.5")),]
+```
+
+define ordering
+```{r}
+#scRNA
+sampleloks <- c("MET","PT","MET","MET","PT","MET","MET","LN","PT","MET","LN","LN","LN","PT","LN","MET","MET","MET")
+names(sampleloks) <- c("1","2.1","2.2","2.3","3","4.1","4.2","4.3","6.1/6.4","6.2","6.3","6.5","6.6","7.1/7.4","7.5","7.2","7.3","7.6")
+#bulk
+sampleloks.bulk <- c("MET","PT","MET","MET","PT","MET","MET","LN","PT","MET","LN","LN","LN","PT","LN","MET","MET","MET")
+names(sampleloks.bulk) <- c("1","2.1","2.2","2.3","3","4.1","4.2","4.3","6.1/6.4","6.2","6.3","6.5","6.6","7.1/7.4","7.5","7.2","7.3","7.6")
+
+types <- c("Tumor","Fibroblasts","Muscle cells","ECs","Pericytes","T-Cells","B-Cells","Plasmablasts","Macrophages","cDCs","pDCs","RBCs")
+
+clustercolors <- colorfunc(types)
+clustercolors["Tumor"] <- "#8b0000"
+```
+
+# Investigate signature matrix
+
+```{r}
+markergenes <- list(
+  epithelial = c("KRT17","KRT14","KRT6A","KRT5","SFN","EPCAM"),
+  pEMT = c("VIM","CXCL14","MMP10","MMP13","IFITM1","IFITM3","EGR1"),
+  epidiff = c("S100A7","S100A8","S100A9","KRT6B","KRT16","SPRR1B","KRTDAP"),
+  hypoxia = c("NDRG1","LAMB3","TIMP3","P4HA1","EGLN3","SLC2A1"),
+  metabolism = c("ASNS","ASS1","PSAT1","PHGDH","WARS","TRIB3"),
+  CXCL = c("CXCL1","CXCL2","CXCL3","CXCL8","CXCL9","CXCL10"),
+  MALAT1NEAT1 = c("MALAT1","NEAT1"),
+  TCells = c("CD3D","CD3E","CD3G"),
+  RegulatoryTCells = c("CD4","FOXP3","CTLA4"),
+  CytotoxicTCells = c("CD8A","GZMK","GZMA","CCL5"),
+  BCells = c("CD79A","MS4A1","IGHD","IGHM"),
+  Fibroblasts = c("DCN","TAGLN","FN1"),
+  FibECM = c("COL1A1","MMP1","MMP2","MMP3","MMP9","MMP10","MMP11","MMP14","MMP19"),
+  FibImmune = c("PLA2G2A","CXCL14","CXCL12","C3","C7","CCL19","CCL21"),
+  myofibroblasts = c("ACTA2","MCAM","MYH11","MYLK"),
+  myoblasts = c("MYF5","MYF6","DES","CHRDL2"),
+  Musclecells = c("TTN","DES","ACTA1"),
+  Macrophages = c("FCER1G","LYZ"),
+  cDCs = c("FCER1A"),
+  Plasmablasts = c("IGHG1","IGHG3","JCHAIN"),
+  Pericytes = c("RGS5","TIMP1"),
+  ECs = c("VWF"),
+  pDCs = c("LILRA4","GZMB","IRF4"),
+  RBCs = c("HBA1","HBA2","HBB")
+)
+
+sigmat.marker <- list()
+sigmat.marker.hm <- list()
+for (x in names(markergenes)) {
+  sigmat.marker[[x]] <- sigmat[markergenes[[x]],]
+  sigmat.marker[[x]] <- sigmat.marker[[x]][!is.na(rowSums(sigmat.marker[[x]])),]
+  
+  sigmat.marker.hm[[x]] <- Heatmap(t(sigmat.marker[[x]]),
+                                   name="scale.data", 
+                                   column_title = x,
+                                   col=circlize::colorRamp2(breaks=c(0,median(unlist(sigmat.marker[[x]])),max(sigmat.marker[[x]])),colors = c("white","black","red")),
+                                   show_column_names = T,
+                                   show_row_names = T,
+                                   cluster_columns = T,
+                                   clustering_method_columns = "ward.D2",
+                                   clustering_distance_columns = "euclidean",
+                                   cluster_rows = F, 
+                                   row_order = types,
+                                   #clustering_method_rows = "ward.D2",
+                                   #clustering_distance_rows = "euclidean",
+                                   row_title_rot = 0,
+                                   column_title_rot = 90,
+                                   #graphic options
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   column_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = T,
+                                   use_raster = T,
+                                   raster_device = "CairoPNG",
+                                   raster_quality = 4,
+                                   height = unit(4,"in"),
+                                   width = unit(nrow(sigmat.marker[[x]])/4,"in"))
+}
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/zoom0-sigmat-markergenes.pdf"), width=40, height=20)
+sigmat.marker.hm$epithelial + sigmat.marker.hm$pEMT + sigmat.marker.hm$epidiff + sigmat.marker.hm$hypoxia + sigmat.marker.hm$metabolism + sigmat.marker.hm$CXCL + sigmat.marker.hm$TCells + sigmat.marker.hm$RegulatoryTCells + sigmat.marker.hm$CytotoxicTCells + sigmat.marker.hm$BCells + sigmat.marker.hm$Fibroblasts + sigmat.marker.hm$FibECM + sigmat.marker.hm$FibImmune + sigmat.marker.hm$myofibroblasts + sigmat.marker.hm$myoblasts + sigmat.marker.hm$Musclecells + sigmat.marker.hm$Macrophages + sigmat.marker.hm$cDCs + sigmat.marker.hm$Plasmablasts + sigmat.marker.hm$Pericytes + sigmat.marker.hm$ECs + sigmat.marker.hm$pDCs + sigmat.marker.hm$RBCs
+dev.off()
+```
+
+## Analyze fractions
+
+## bulk RNA seq
+
+```{r}
+cellfrac <- cellfrac.data[,-which(colnames(cellfrac.data) %in% c("RMSE","Correlation","P-value"))]
+cellfrac <- cellfrac[,match(types,colnames(cellfrac))]
+
+cellfrac.noall <- cellfrac[grep("all",rownames(cellfrac),invert = T),]
+
+sampleorder <- rev(rownames(cellfrac.noall))
+
+#stacked barplot
+cellfrac.noall.forbp <- cellfrac.noall
+rownames(cellfrac.noall.forbp) <- paste0(rownames(cellfrac.noall.forbp),"-",sampleloks.bulk[rownames(cellfrac.noall.forbp)])
+
+cellfrac.noall.bp <- ggplot(data=reshape2::melt(cbind(sample=rownames(cellfrac.noall.forbp),cellfrac.noall.forbp))) +
+  geom_bar(aes(x=factor(sample,levels = paste0(sampleorder,"-",sampleloks.bulk[sampleorder])),
+               y=value,
+               fill=variable),
+           stat="identity",
+           position = "stack") +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  labs(x="",y="fraction",fill="types") +
+  scale_fill_manual(values = clustercolors) +
+  coord_flip(ylim = c(0,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNAnoall-bp.svg"),cellfrac.noall.bp, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNAnoall-bp-noleg.svg"),cellfrac.noall.bp + theme(legend.position = "none"), width=5, height=5)
+```
+
+## single cell RNA
+
+```{r}
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/RData/SCCfiltnod.RData")
+SCC$CellType_SCTccmito_harmony_zoom0 <- factor(SCC$CellType_SCTccmito_harmony_zoom0,levels = types)
+```
+
+```{r}
+#unite 6.1/6.4 and 7.1/7.4
+SCC$sample <- as.character(SCC$sample)
+SCC$sample[SCC$sample=="6.1"] <- "6.1/6.4"
+SCC$sample[SCC$sample=="6.4"] <- "6.1/6.4"
+SCC$sample[SCC$sample=="7.1"] <- "7.1/7.4"
+SCC$sample[SCC$sample=="7.4"] <- "7.1/7.4"
+SCC$sample <- factor(SCC$sample)
+
+cellfrac.scRNA <- do.call(rbind,lapply(levels(SCC$sample)[levels(SCC$sample) %in% unique(SCC$sample)],function(x) table(SCC$CellType_SCTccmito_harmony_zoom0[SCC$sample==x])))
+rownames(cellfrac.scRNA) <- levels(SCC$sample)[levels(SCC$sample) %in% unique(SCC$sample)]
+#filter for doublets and negatives
+cellfrac.scRNA <- cellfrac.scRNA[-which(rownames(cellfrac.scRNA) %in% c("Doublet","Negative")),]
+#fractions
+cellfrac.scRNA <- cellfrac.scRNA / rowSums(cellfrac.scRNA)
+#for direct comparison we also remove sample 5 and LNs from analysis
+cellfrac.scRNA <- cellfrac.scRNA[-which(rownames(cellfrac.scRNA) %in% c("5","4.3","6.3","6.5","6.6","7.5")),]
+
+sampleorder <- rev(rownames(cellfrac.scRNA))
+
+#stacked barplot of tumor phenotypes
+cellfrac.scRNA.forbp <- cellfrac.scRNA
+rownames(cellfrac.scRNA.forbp) <- paste0(rownames(cellfrac.scRNA.forbp),"-",sampleloks[rownames(cellfrac.scRNA.forbp)])
+
+cellfrac.scRNA.bp <- ggplot(data=reshape2::melt(cellfrac.scRNA.forbp)) +
+  geom_bar(aes(x=factor(Var1,levels = paste0(sampleorder,"-",sampleloks[sampleorder])),
+               y=value,
+               fill=Var2),
+           stat="identity",
+           position = "stack") + #position_fill(reverse = T)) +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  scale_fill_manual(values = clustercolors) +
+  labs(x="",y="fraction",fill="types") +
+  coord_flip(ylim = c(0,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-bp.svg"),cellfrac.scRNA.bp, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-bp-noleg.svg"),cellfrac.scRNA.bp + theme(legend.position = "none"), width=5, height=5)
+```

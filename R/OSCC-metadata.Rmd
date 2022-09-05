@@ -1,0 +1,25 @@
+---
+title: "Create Metadata"
+author: "Kai"
+date: "04th September 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load
+
+```{r}
+library(Seurat)
+OUTPUT = "//bi-medfiles.win.uni-due.de/translationale hautkrebsforschung/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+
+#all cells
+load(paste0(OUTPUT,"RData/SCCfiltnod.RData"))
+
+metadata.df <- data.frame(cell= names(SCC$CellType_SCTccmito_harmony_zoom0),
+                          celltype_classification=as.character(SCC$CellType_SCTccmito_harmony_zoom0))
+
+write.csv(x = metadata.df,file = paste0(OUTPUT,"celltype_metadata.csv"),row.names = F,col.names = F)
+```

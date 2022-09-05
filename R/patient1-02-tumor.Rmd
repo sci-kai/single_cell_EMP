@@ -1,0 +1,287 @@
+---
+title: "patient1 - tumor"
+author: "Kai"
+date: "27th July 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/patient1/"
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+load(paste0(OUTPUT,"RData/patient1-filt.RData"))
+```
+
+# Subset
+
+```{r}
+patient1.tumor <- subset(patient1.filt,cells = names(patient1.filt$CellType[patient1.filt$CellType == "Tumor"]))
+
+DefaultAssay(patient1.tumor) <- "RNA"
+patient1.tumor@assays$SCTccmito <- NULL
+patient1.tumor@assays$SCTccmitoccmito <- NULL
+for (x in names(patient1.tumor@reductions)) {patient1.tumor@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+After subsetting of cells we have to re-run the preprocessing steps for normalization, dimensionality reduction, etc. 
+This is needed, since the gene expression matrix is now reduced and enables more accurate capturing of the heterogeneity in the cells (e.g. principal components capturing the tumor heterogeneity).
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+DefaultAssay(patient1.tumor) <- "RNA"
+#log-normalization for slot "data"
+patient1.tumor <- NormalizeData(patient1.tumor, 
+                                normalization.method = "LogNormalize", #default
+                                scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                                assay = "RNA",
+                                margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+patient1.tumor <- FindVariableFeatures(patient1.tumor, 
+                                       assay = "RNA",
+                                       selection.method = "vst", #default
+                                       nfeatures = 2000 #default; only 2000 , 3000 for SCTccmito promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+patient1.tumor <- ScaleData(patient1.tumor, 
+                            features = VariableFeatures(patient1.tumor,assay = "RNA"), 
+                            do.scale = T,
+                            do.center = T,
+                            scale.max = 10,
+                            assay = "RNA")
+```
+
+## Determine cell cycle
+
+```{r}
+patient1.tumor <- CellCycleScoring(patient1.tumor,
+                                   s.features = cc.genes.updated.2019$s.genes,
+                                   g2m.features = cc.genes.updated.2019$g2m.genes, 
+                                   assay="RNA")
+```
+
+## Normalization with SCTransform
+
+More information: https://doi.org/10.1186/s13059-019-1874-1
+
+```{r SCC_normalization}
+patient1.tumor <- SCTransform(patient1.tumor, 
+                              ncells=ncol(patient1.tumor), #default  
+                              assay="RNA", #default
+                              new.assay.name = "SCTccmito", #default
+                              do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                              variable.features.n = 3000, #default set variable features
+                              vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                              do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                              do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                              return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                              seed.use = 1448145)
+```
+
+# Dimensionality reduction
+
+## PCA
+
+```{r}
+patient1.tumor <- RunPCA(patient1.tumor, 
+                         npcs = 50,  #number of PCs to use
+                         assay = "SCTccmito",
+                         rev.pca = F, # default, Run cell x gene matrix
+                         weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+                         approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+                         features = VariableFeatures(patient1.tumor,assay = "SCTccmito"), #default
+                         reduction.name = "pca_SCTccmito",
+                         verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- patient1.tumor@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(patient1.tumor@assays$SCTccmito@scale.data)[VariableFeatures(patient1.tumor,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(patient1.tumor, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "orig.ident") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+PCAplot.SCTccmito
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+#based on PCA
+patient1.tumor <- FindNeighbors(patient1.tumor, 
+                                dims = 1:numberofPCs, 
+                                reduction = "pca_SCTccmito",
+                                assay = "SCTccmito")
+patient1.tumor <- FindClusters(patient1.tumor, 
+                               resolution = 1,
+                               random.seed=100)
+
+patient1.tumor$seurat_clusters_tumor_SCTccmito_PCA <- patient1.tumor$seurat_clusters
+patient1.tumor$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP}
+patient1.tumor <- RunUMAP(patient1.tumor,
+                          dims = 1:numberofPCs,
+                          assay = "SCTccmito",
+                          umap.method = "uwot", # Seurat default
+                          graph=NULL, #default
+                          reduction="pca_SCTccmito",
+                          reduction.name = "umap_SCTccmito"
+)
+```
+
+```{r}
+UMAP.SCTccmito.clusPCA <- DimPlot(patient1.tumor, 
+                                  reduction = "umap_SCTccmito", 
+                                  pt.size = 1, 
+                                  label = T, 
+                                  group.by = "seurat_clusters_tumor_SCTccmito_PCA") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.Phase <- DimPlot(patient1.tumor, 
+                                reduction = "umap_SCTccmito", 
+                                pt.size = 1, 
+                                label = F, 
+                                group.by = "Phase") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.QC <- FeaturePlot(patient1.tumor, 
+                                 features = c("nCount_RNA_log10", "nFeature_RNA_log10", "percent.mito", "n.exp.hkgenes","S.Score","G2M.Score"), 
+                                 reduction = "umap_SCTccmito", 
+                                 cols = c("grey95", "blue"),
+                                 pt.size = 1,
+                                 order = T,
+                                 slot = "data")
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA + theme(legend.position = "none"),width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-Phase.svg"),UMAP.SCTccmito.Phase,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-Phase-noleg.svg"),UMAP.SCTccmito.Phase + theme(legend.position = "none") + ggtitle(NULL),width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-QC.svg"),UMAP.SCTccmito.QC, width=10, height=15)
+
+UMAP.SCTccmito.clusPCA
+UMAP.SCTccmito.QC
+```
+
+# Check for other cell types present
+
+## Marker gene expression
+
+```{r}
+#defined celltype markers centrally to always use a up-to-date list.
+UMAP.SCTccmito.marker <- lapply(names(celltypemarkers), function(x) FeaturePlot_markers_comb(patient1.tumor,celltypemarkers[[x]],reduction = "umap_SCTccmito"))
+names(UMAP.SCTccmito.marker) <- names(celltypemarkers)
+
+lapply(names(UMAP.SCTccmito.marker), function(x) ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-marker-",x,".png"),UMAP.SCTccmito.marker[[x]], width=ifelse(length(celltypemarkers[[x]])>1,10,5), height=5*ceiling(length(celltypemarkers[[x]])/2)))
+
+UMAP.SCTccmito.marker
+```
+
+# Differential Expression
+
+```{r}
+#Differential expression of every cluster against all other cluster
+patient1.tumor.marker <- calculate_foldchanges(patient1.tumor,patient1.tumor$seurat_clusters_tumor_SCTccmito_PCA)
+```
+
+# Volcano Plots 
+
+```{r}
+library(ggrepel)
+#set thres function for selecting genes to mark in volcano plot
+pctcutoff = function(x) {
+  c(sort(patient1.tumor.marker[patient1.tumor.marker$cluster==x,]$pct.1 - patient1.tumor.marker[patient1.tumor.marker$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+patient1.tumor.marker.volpctpos <- lapply(levels(patient1.tumor.marker$cluster), function(x) ggvolcano(patient1.tumor.marker[patient1.tumor.marker$cluster==x,],pctcutoff(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(patient1.tumor.marker.volpctpos) <- levels(patient1.tumor.marker$cluster)
+
+#save volcano plots
+for (i in names(patient1.tumor.marker.volpctpos)) {
+  ggsave(filename = paste0(OUTPUT,"figs/patient1-all-diffexpr-SCTccmito-celltype-volcanopct-onlypos-",i,".svg"),patient1.tumor.marker.volpctpos[[i]],width = 5, height = 5)
+}
+
+patient1.tumor.marker.volpctpos
+```
+
+# Relabel for filtering
+
+```{r}
+patient1.tumor$CellType_tumor <- as.character(patient1.tumor$seurat_clusters_tumor_SCTccmito_PCA)
+
+patient1.tumor$CellType_tumor[patient1.tumor$CellType_tumor=="9"] <- "Fibroblasts" 
+patient1.tumor$CellType_tumor[patient1.tumor$CellType_tumor=="10"] <- "cDCs" 
+patient1.tumor$CellType_tumor[!patient1.tumor$CellType_tumor %in% c("cDCs","Fibroblasts")] <- "Tumor"
+
+UMAP.SCTccmito.celltypetumor <- DimPlot(patient1.tumor, 
+                                        reduction = "umap_SCTccmito", 
+                                        pt.size = 1, 
+                                        label = F, 
+                                        order = T,
+                                        group.by = "CellType_tumor") +
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-CellTypetumor-noleg.svg"),UMAP.SCTccmito.celltypetumor + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/patient1-tumor-SCTccmito-UMAP-CellTypetumor.svg"),UMAP.SCTccmito.celltypetumor + labs(title = NULL), width = 5, height = 5)
+
+UMAP.SCTccmito.celltypetumor
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/patient1-tumor.RData"),patient1.tumor)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/patient1-tumor-sessionInfo.txt"))
+```
