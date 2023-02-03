@@ -18,7 +18,7 @@ library(RColorBrewer)
 library(fgsea)
 library(cowplot)
 
-source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions_220808.R"))
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
 OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
 ```
 
@@ -564,16 +564,14 @@ expr.RNAscaledata.hl.clusharmony30.hm
 dev.off()
 ```
 
-## low zoom level (zoom0)
+## only broad cell types for cibersortx
 
 ```{r}
 SCC.fibro$Celltype_fibro_zoom0 <- as.character(SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res3)
-SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res15=="42"] <- "Myoblasts"
-SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res15=="60"] <- "Fibroblasts"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="0"] <- "Pericytes"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="1"] <- "Fibroblasts"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="2"] <- "Fibroblasts"
-SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="3"] <- "Myofibroblasts"
+SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="3"] <- "Fibroblasts"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="4"] <- "Fibroblasts"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="5"] <- "Fibroblasts"
 SCC.fibro$Celltype_fibro_zoom0[SCC.fibro$Celltype_fibro_zoom0=="6"] <- "Fibroblasts"

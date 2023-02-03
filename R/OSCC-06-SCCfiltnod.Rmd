@@ -1,0 +1,601 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "2th June 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+This code reproduces the combined object of OSCC cells without doublets as input for cibersortx.
+Further, it resembles the UMAPs shown in the TME figures of the paper.
+
+# Load Seurat Objects with annotations
+
+## B-Cells
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-BCells.RData"))
+doublet_BCells1 <- paste0("BCells-doublets-",SCC.B$CellType_BCells[!SCC.B$CellType_BCells %in% c("B-Cells","Plasmablasts")])
+names(doublet_BCells1) <- names(SCC.B$CellType_BCells[!SCC.B$CellType_BCells %in% c("B-Cells","Plasmablasts")])
+load(paste0(OUTPUT,"RData/SCCfilt-BCellsfilt.RData"))
+doublet_BCells2 <- paste0("BCells-doublets-",SCC.B$CellType_BCells2[!SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+names(doublet_BCells2) <- names(SCC.B$CellType_BCells2[!SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+doublet_BCells <- c(doublet_BCells1,doublet_BCells2)
+
+BCells.zoom0 <- SCC.B$CellType_BCells2[SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")]
+names(BCells.zoom0) <- names(SCC.B$CellType_BCells2[SCC.B$CellType_BCells2 %in% c("B-Cells","Plasmablasts")])
+```
+
+## Tumor Cells
+
+```{r}
+#doublets
+load(paste0(OUTPUT,"RData/SCCfilt-epi.RData"))
+doublet_tumor <- paste0("Tumor-doublets-",SCC.epi$CellType_epi[!SCC.epi$CellType_epi=="Tumor"])
+names(doublet_tumor) <- names(SCC.epi$CellType_epi[!SCC.epi$CellType_epi=="Tumor"])
+
+epi.zoom0 <- SCC.epi$CellType_epi[SCC.epi$CellType_epi=="Tumor"]
+names(epi.zoom0) <- names(SCC.epi$CellType_epi)
+```
+
+## Fibroblasts
+
+```{r}
+#doublets
+load(paste0(OUTPUT,"RData/SCCfilt-fibro.RData"))
+doublet_fibro <- paste0("Fibroblasts-doublets-",SCC.fibro$CellType_fibro_SCTccmito_harmony[!SCC.fibro$CellType_fibro_SCTccmito_harmony=="Fibroblasts"])
+names(doublet_fibro) <- names(SCC.fibro$CellType_fibro_SCTccmito_harmony[!SCC.fibro$CellType_fibro_SCTccmito_harmony=="Fibroblasts"])
+
+#zoom levels
+load(paste0(OUTPUT,"RData/SCCfilt-fibrofilt.RData"))
+fibro.zoom0 <- SCC.fibro$Celltype_fibro_zoom0
+names(fibro.zoom0) <- names(SCC.fibro$Celltype_fibro_zoom0)
+```
+
+## myeloid
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-my.RData"))
+
+doublet_my <- paste0("myeloid-doublets-",SCC.my$CellType_my[!SCC.my$CellType_my %in% c("myeloid cells")])
+names(doublet_my) <- names(SCC.my$CellType_my[!SCC.my$CellType_my %in% c("myeloid cells")])
+
+load(paste0(OUTPUT,"RData/SCCfilt-myfilt.RData"))
+my.zoom0 <- SCC.my$Celltype_my_zoom0
+names(my.zoom0) <- names(SCC.my$Celltype_my_zoom0)
+```
+
+## T-Cells
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-TCells.RData"))
+doublet_TCells <- paste0("TCells-doublets-",SCC.T$CellType_TCells[!SCC.T$CellType_TCells=="T-Cells"])
+names(doublet_TCells) <- names(SCC.T$CellType_TCells[!SCC.T$CellType_TCells=="T-Cells"])
+
+TCells.zoom0 <- SCC.T$CellType_TCells[SCC.T$CellType_TCells=="T-Cells"]
+names(TCells.zoom0) <- names(SCC.T$CellType_TCells[SCC.T$CellType_TCells=="T-Cells"])
+```
+
+## merge  all together and annotate
+
+```{r}
+#all together
+doublets <- c(doublet_fibro,doublet_my,doublet_BCells,doublet_TCells,doublet_tumor)
+
+#rename non-doublets
+doublets[doublets=="Fibroblasts-doublets-Muscle cells"] <- "Muscle cells"
+doublets[doublets=="TCells-doublets-Mast cells"] <- "Mast cells"
+doublets[doublets=="BCells-doublets-cycling Immune cells"] <- "cycling Immune cells"
+
+zoom0 <- c(fibro.zoom0,my.zoom0,BCells.zoom0,TCells.zoom0,epi.zoom0,doublets[doublets %in% c("Muscle cells","Mast cells","cycling Immune cells")])
+
+doublets <- doublets[!doublets %in% c("Muscle cells","Mast cells","cycling Immune cells")]
+
+#load SCC file and other celltypes
+load(paste0(OUTPUT,"RData/SCCfilt.RData"))
+
+endo <- as.character(SCC$CellType_SCTccmito_harmony[SCC$CellType_SCTccmito_harmony %in% c("ECs")])
+names(endo) <- names(SCC$CellType_SCTccmito_harmony[SCC$CellType_SCTccmito_harmony %in% c("ECs")])
+
+# Assign new Annotations
+SCC$CellType_SCTccmito_harmony_zoom0 <- "NA"
+SCC$CellType_SCTccmito_harmony_zoom0 <- c(doublets,zoom0,endo)[match(names(SCC$CellType_SCTccmito_harmony_zoom0),names(c(doublets,zoom0,endo)))]
+
+umapharmony.SCTccmito.zoom0 <- DimPlot(SCC,
+                                   reduction = "humap_SCTccmito_sigma0.25",
+                                   pt.size = 1,
+                                   label = T,
+                                   raster = F,
+                                   group.by = "CellType_SCTccmito_harmony_zoom0") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0.svg"),umapharmony.SCTccmito.zoom0)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0-noleg.svg"),umapharmony.SCTccmito.zoom0 + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+umapharmony.SCTccmito.zoom0
+```
+
+```{r}
+#all types separately
+umapharmony.SCTccmito.zoom0.type <- list()
+for (type in unique(SCC$CellType_SCTccmito_harmony_zoom0)) {
+  umapharmony.SCTccmito.zoom0.type[[type]] <- DimPlot(AddMetaData(SCC, SCC$CellType_SCTccmito_harmony_zoom0 == type, col.name = "typetemp"), 
+          reduction = "humap_SCTccmito_sigma0.25", 
+          pt.size = 1, 
+          label = F, 
+          raster = F,
+          order = "TRUE",
+          cols = c("grey95","blue"),
+          group.by = "typetemp") +  
+    ggtitle(type) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-all-SCTccmito-UMAPharmony-zoom0-",gsub("[)]",".",gsub("[(]",".",gsub("[?]",".",gsub("-",".",gsub(" ",".",gsub("/",".",type)))))),"-noleg.png"),umapharmony.SCTccmito.zoom0.type[[type]] + theme(legend.position = "none"), width = 10, height = 10)
+}
+
+umapharmony.SCTccmito.zoom0.type
+```
+
+# remove possible doublets and cycling cells
+
+```{r}
+SCC <- subset(SCC,cells = names(SCC$CellType_SCTccmito_harmony_zoom0[!SCC$CellType_SCTccmito_harmony_zoom0 %in% c("doublets","cycling Immune cells")]))
+
+DefaultAssay(SCC) <- "RNA"
+SCC@assays$SCT <- NULL
+SCC@assays$SCTccmito <- NULL
+for (x in names(SCC@reductions)) {SCC@reductions[[x]] <- NULL}
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(SCC) <- "RNA"
+#log-normalization for slot "data"
+SCC <- NormalizeData(SCC, 
+                     normalization.method = "LogNormalize", #default
+                     scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                     assay = "RNA",
+                     margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+SCC <- FindVariableFeatures(SCC, 
+                            assay = "RNA",
+                            selection.method = "vst", #default
+                            nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+SCC <- ScaleData(SCC,
+                 features = VariableFeatures(SCC,assay = "RNA"),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+```
+
+```{r}
+#from Tirosh et al 2015 cell cycle genes, included in Seurat package the "data" slot is always picked, based on RNA assay
+SCC <- CellCycleScoring(SCC,
+                        s.features = cc.genes.updated.2019$s.genes,
+                        g2m.features = cc.genes.updated.2019$g2m.genes, 
+                        assay="RNA")
+```
+
+# Normalization with SCTransform
+
+```{r SCC_normalization}
+SCC <- SCTransform(SCC, 
+                   ncells = ncol(SCC),
+                   assay="RNA", #default
+                   new.assay.name = "SCTccmito", #default; overwrites old SCT
+                   do.correct.umi = T, #default change counts slot to corrected counts in new assay
+                   variable.features.n = 3000, #default set variable features
+                   vars.to.regress = c("S.Score","G2M.Score","percent.mito"), #default optional variables to regress out
+                   do.scale = F, #default scale pearson residuals in scale.data slot to have unit variance
+                   do.center = T, #default center pearson residuals in scale.data to have mean zero, needed for PCA
+                   return.only.var.genes = T, #default scale.data.matrices output assay only contains variable genes
+                   seed.use = 1448145)
+
+# Save SCT normalized seurat object
+save(file = paste0(OUTPUT,"RData/SCCfiltnod-SCTSeurat.RData"),SCC)
+```
+
+# Add Annotation
+
+```{r}
+SCC$Lok <- factor(SCC$Lok,levels = c("PT","LN-MET","LN","NA"))
+SCC$CellType_SCTccmito_harmony_zoom0 <- factor(SCC$CellType_SCTccmito_harmony_zoom0, levels = levels(SCC$CellType_SCTccmito_harmony_zoom0)[levels(SCC$CellType_SCTccmito_harmony_zoom0) %in% levels(factor(SCC$CellType_SCTccmito_harmony_zoom0))])
+```
+
+## PCA
+
+```{r}
+SCC <- RunPCA(SCC, 
+              npcs = 50,  #number of PCs to use
+              assay = "SCTccmito",
+              rev.pca = F, # default, Run cell x gene matrix
+              weight.by.var = T, #default, Weight cell embedding by variance of each PC!)
+              approx = T, #if TRUE, uses irlba instead of prcomp, which is a single value decomposition to approximate PCs, saving computation time (by not calculating all PCs; important for big datasets) and being similar/same to PCs
+              features = VariableFeatures(SCC,assay = "SCTccmito"), #default
+              reduction.name = "pca_SCTccmito",
+              verbose = F)
+```
+
+```{r}
+#calculate the % variance explained
+PCAvar.SCTccmito <- SCC@reductions$pca_SCTccmito@stdev^2 / sum(matrixStats::rowVars(as.matrix(SCC@assays$SCTccmito@scale.data)[VariableFeatures(SCC,assay = "SCTccmito"),]))
+
+#PCA plot
+PCAplot.SCTccmito <- DimPlot(SCC, reduction = "pca_SCTccmito", dims = c(1,2), group.by = "patient") + 
+  labs(x=paste0("principal component 1 (",signif(PCAvar.SCTccmito[1]*100,digits = 2),"% of variance)"),
+       y=paste0("principal component 2 (",signif(PCAvar.SCTccmito[2]*100,digits = 2),"% of variance)")) +
+  theme_jb_nogrid()
+
+#elbow plot
+PCAelbowplot.SCTccmito <- ggplot(data=data.frame(var=PCAvar.SCTccmito,
+                                                 PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=var)) +
+  labs(x="principal component", y="% of variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+# cumulative variance Plot
+PCAsumplot.SCTccmito <- ggplot(data=data.frame(cumvar=cumsum(PCAvar.SCTccmito),PC=1:length(PCAvar.SCTccmito))[1:50,]) +
+  geom_point(mapping = aes(x=PC,y=cumvar)) +
+  labs(x="principal component", y="% of cumulative variance") +
+  scale_x_continuous(breaks=seq(0,50,5)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA.svg"),PCAplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA-noleg.svg"),PCAplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA-elbow.svg"),PCAelbowplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA-elbow-noleg.svg"),PCAelbowplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA-variancesum.svg"),PCAsumplot.SCTccmito, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-PCA-variancesum-noleg.svg"),PCAsumplot.SCTccmito + theme(legend.position = "none") + labs(title = NULL), width = 5, height = 5)
+
+PCAelbowplot.SCTccmito
+PCAsumplot.SCTccmito
+PCAplot.SCTccmito
+```
+
+## Graph-based clustering
+
+```{r FindClusters}
+numberofPCs = 20
+
+#based on PCA
+SCC <- FindNeighbors(SCC, 
+                     dims = 1:numberofPCs, 
+                     reduction = "pca_SCTccmito",
+                     assay = "SCTccmito")
+SCC <- FindClusters(SCC, 
+                    resolution = 2,
+                    random.seed=100)
+
+SCC$seurat_clusters_all_SCTccmito_PCA <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL 
+```
+
+## UMAP
+
+```{r UMAP}
+SCC <- RunUMAP(SCC,
+               dims = 1:numberofPCs,
+               assay = "SCTccmito",
+               umap.method = "uwot", # Seurat default
+               graph=NULL, #default
+               reduction="pca_SCTccmito",
+               reduction.name = "umap_SCTccmito"
+)
+```
+
+factors and colors for zoom0
+```{r}
+types <- c("Tumor","Fibroblasts","Muscle cells","ECs","Pericytes","T-Cells","B-Cells","Plasmablasts","Macrophages","cDCs","pDCs","RBCs")
+
+SCC$CellType_SCTccmito_harmony_zoom0 <- factor(SCC$CellType_SCTccmito_harmony_zoom0,levels=types)
+
+ctcol <- colorfunc(types)
+ctcol["Tumor"] <- "#8b0000"
+```
+
+
+```{r}
+UMAP.SCTccmito.clusPCA <- DimPlot(SCC, 
+                                  reduction = "umap_SCTccmito", 
+                                  pt.size = 0.1, 
+                                  label = T, 
+                                  group.by = "seurat_clusters_all_SCTccmito_PCA") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.celltype.zoom0 <- DimPlot(SCC, 
+                                         reduction = "umap_SCTccmito", 
+                                         pt.size = 0.1, 
+                                         label = T, 
+                                         group.by = "CellType_SCTccmito_harmony_zoom0") +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  scale_color_manual(values = ctcol) +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.sample <- DimPlot(SCC, 
+                                 reduction = "umap_SCTccmito", 
+                                 pt.size = 0.1, 
+                                 label = F, 
+                                 group.by = "sample",
+                                 raster = T) +  
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.patients <- DimPlot(SCC, 
+                                   reduction = "umap_SCTccmito", 
+                                   pt.size = 0.1, 
+                                   label = F, 
+                                   group.by = "patient",
+                                   raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.hashID <- DimPlot(SCC, 
+                                 reduction = "umap_SCTccmito", 
+                                 pt.size = 0.1, 
+                                 label = F, 
+                                 group.by = "hash.ID",
+                                 raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+UMAP.SCTccmito.hashglobal <- DimPlot(SCC, 
+                                     reduction = "umap_SCTccmito", 
+                                     pt.size = 0.1, 
+                                     label = F, 
+                                     group.by = "hash.global",
+                                     raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.Lok <- DimPlot(SCC, 
+                              reduction = "umap_SCTccmito", 
+                              pt.size = 0.1, 
+                              label = F, 
+                              group.by = "Lok",
+                              raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  scale_color_brewer(palette = "Set1") +
+  theme_jb_nogrid() 
+
+UMAP.SCTccmito.tech <- DimPlot(SCC, 
+                               reduction = "umap_SCTccmito", 
+                               pt.size = 0.1, 
+                               label = F, 
+                               group.by = "technology",
+                               raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.lib <- DimPlot(SCC, 
+                              reduction = "umap_SCTccmito", 
+                              pt.size = 0.1, 
+                              label = F, 
+                              group.by = "lib",
+                              raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.Phase <- DimPlot(SCC, 
+                                reduction = "umap_SCTccmito", 
+                                pt.size = 0.1, 
+                                label = F, 
+                                group.by = "Phase",
+                                raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+UMAP.SCTccmito.pSG <- FeaturePlot(SCC, 
+                                  features = c("percent.mito","S.Score","G2M.Score"), 
+                                  cols = c("grey95", "blue"),
+                                  pt.size = 0.1,
+                                  order = T,
+                                  combine = T,
+                                  ncol = 3,
+                                  reduction = "umap_SCTccmito",
+                                  slot = "data",
+                                  raster = T) + 
+  labs(x="UMAP_1",y="UMAP_2") + 
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-clusPCA.svg"),UMAP.SCTccmito.clusPCA,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-clusPCA-noleg.svg"),UMAP.SCTccmito.clusPCA + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-zoom0.svg"),UMAP.SCTccmito.celltype.zoom0,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-zoom0-noleg.svg"),UMAP.SCTccmito.celltype.zoom0 + theme(legend.position = "none") + ggtitle(NULL),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-sample.svg"),UMAP.SCTccmito.sample,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-sample-noleg.svg"),UMAP.SCTccmito.sample + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-patients.svg"),UMAP.SCTccmito.patients,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-patients-noleg.svg"),UMAP.SCTccmito.patients + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-hashID.svg"),UMAP.SCTccmito.hashID,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-hashID-noleg.svg"),UMAP.SCTccmito.hashID + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-hashglobal.svg"),UMAP.SCTccmito.hashglobal,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-hashglobal-noleg.svg"),UMAP.SCTccmito.hashglobal + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-Lok.svg"),UMAP.SCTccmito.Lok,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-Lok-noleg.svg"),UMAP.SCTccmito.Lok + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-technology.svg"),UMAP.SCTccmito.tech,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-technology-noleg.svg"),UMAP.SCTccmito.tech + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-lib.svg"),UMAP.SCTccmito.lib,width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-lib-noleg.svg"),UMAP.SCTccmito.lib + theme(legend.position = "none"),width=5,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-Phase.svg"),UMAP.SCTccmito.Phase, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-Phase-noleg.svg"),UMAP.SCTccmito.Phase + theme(legend.position = "none"), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-percentmito.svg"),UMAP.SCTccmito.pSG, width=15, height=5)
+
+UMAP.SCTccmito.clusPCA
+UMAP.SCTccmito.celltype.zoom0
+UMAP.SCTccmito.sample
+UMAP.SCTccmito.patients
+UMAP.SCTccmito.hashID
+UMAP.SCTccmito.hashglobal
+UMAP.SCTccmito.Lok
+UMAP.SCTccmito.tech
+UMAP.SCTccmito.lib
+UMAP.SCTccmito.Phase
+UMAP.SCTccmito.pSG
+```
+
+```{r}
+#sample overview
+samples <- data.frame(patient = c("1","2","2","2","3","4","4","4","5","6","6","6","6","6","6","7","7","7","7","7","7"),
+                      Lok =     c("LN-MET","PT","LN-MET","LN-MET","PT","LN-MET","LN-MET","LN","PT","PT","PT","LN-MET","LN","LN","LN","PT","PT","LN","LN-MET","LN-MET","LN-MET"))
+samples$Lok <- factor(samples$Lok,levels = c("PT","LN-MET","LN"))
+samples$Freq <- rep(1,nrow(samples))
+p0 <- ggplot(data=samples) +
+  geom_bar(aes(x=patient,
+               y=Freq,
+               fill=Lok),
+           stat="identity",
+           position="stack") +
+  labs(x="",y="number of samples") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_y_continuous(breaks = seq(0,10,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/samplesperpatient.svg"),p0,width=5,height=3)
+```
+
+```{r}
+SCC$patient <- factor(SCC$patient)
+
+#Celltype table
+celltype_zoom0.t <- as.data.frame(table(SCC$CellType_SCTccmito_harmony_zoom0))
+celltype_zoom0.t <- celltype_zoom0.t[order(celltype_zoom0.t$Freq),]
+SCC$CellType_SCTccmito_harmony_zoom0 <- factor(SCC$CellType_SCTccmito_harmony_zoom0,levels = celltype_zoom0.t$Var1[order(celltype_zoom0.t$Freq)])
+celltype_zoom0.t$Var1 <- factor(celltype_zoom0.t$Var1,levels = celltype_zoom0.t$Var1[order(celltype_zoom0.t$Freq)])
+
+#number of cells per celltype
+library(scales)
+celltype_zoom0.p <- ggplot(data=celltype_zoom0.t) +
+  geom_bar(aes(x=Var1,
+               y=Freq,
+               fill=Var1),
+           stat="identity",
+           position="stack") +
+  labs(x="",y="number of cells",fill="Celltype") +
+  scale_y_continuous(breaks = seq(0,100000,10000),labels=comma) +
+  scale_fill_discrete(type = ctcol) +
+  coord_flip() +
+  theme_jb()
+    
+histbarplot <- function(anno1,anno2, relative=F) {
+  anno.count <- table(anno1=anno1, anno2=anno2)
+  anno.count.melt <-reshape2::melt(anno.count)
+  
+  anno.count.melt$anno2 <- as.character(anno.count.melt$anno2)
+  anno.count.melt$anno2[is.na(anno.count.melt$anno2)] <- "NA"
+  anno.count.melt$anno2 <- factor(anno.count.melt$anno2,levels = levels(anno2))
+  
+  if(relative==F) {
+    #absolute barplot
+    ggplot(data=anno.count.melt) +
+      geom_bar(aes(x=anno1,
+                   y=value,
+                   fill=anno2),
+               stat="identity",
+               position="stack") +
+      labs(x="",y="fraction of cells",fill="types") +
+      coord_flip() +
+      theme_jb()
+  } else {
+    #relative barplot
+    ggplot(data=anno.count.melt) +
+      geom_bar(aes(x=anno1,
+                   y=value,
+                   fill=anno2),
+               stat="identity",
+               position=position_fill(reverse = T)) +
+      scale_y_continuous(breaks = seq(0,1,0.1)) +
+      labs(x="",y="fraction of cells",fill="types") +
+      coord_flip() +
+      theme_jb()
+  }
+}
+
+library(cowplot)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-histbarfigure.svg"),
+       plot_grid(plotlist = list(
+         histbarplot(SCC$CellType_SCTccmito_harmony_zoom0,SCC$patient,relative = T) + scale_fill_brewer(palette = "Set2") + theme(panel.grid.minor.x = element_blank(),legend.position = "none"),
+         histbarplot(SCC$CellType_SCTccmito_harmony_zoom0,SCC$Lok,relative = T) + scale_fill_brewer(palette = "Set1") + theme(axis.text.y = element_blank(),axis.ticks.y = element_blank(),panel.grid.minor.x = element_blank(),legend.position = "none"),
+         celltype_zoom0.p + theme(axis.text.y = element_blank(),axis.ticks.y = element_blank(),legend.position = "none")),
+         ncol=3,nrow=1,align = "h",labels=NULL,axis = "rlbt",rel_widths = c(6,3.5,2)),
+       width=6,height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-histbarfigure-patientleg.svg"),histbarplot(SCC$CellType_SCTccmito_harmony_zoom0,SCC$patient,relative = T) + scale_fill_brewer(palette = "Set2") + labs(fill="patient"),width=5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-histbarfigure-Lokleg.svg"),histbarplot(SCC$CellType_SCTccmito_harmony_zoom0,SCC$Lok,relative = T) + scale_fill_brewer(palette = "Set1") + labs(fill="Lok"),width=5,height = 5)
+```
+
+# Marker expression
+
+```{r}
+library(grid)
+#markers
+markergenes <- list(
+  TCells = c("CD3D","CD3E","CD3G"),
+  RegulatoryTCells = c("CD4","FOXP3","CTLA4"),
+  CytotoxicTCells = c("CD8A","GZMK","GZMA","CCL5"),
+  BCells = c("CD79A","MS4A1","IGHD","IGHM"),
+  Tumor = c("KRT17","KRT14","KRT6A","KRT5","S100A2","SFN"),
+  Fibroblasts = c("DCN","TAGLN","FN1"),
+  Macrophages = c("FCER1G","LYZ"),
+  cDCs = c("FCER1A"),
+  Plasmablasts = c("IGHG1","IGHG3","JCHAIN"),
+  Pericytes = c("RGS5","TIMP1"),
+  ECs = c("VWF"),
+  pDCs = c("LILRA4","GZMB","IRF4"),
+  RBCs = c("HBA1","HBA2","HBB"),
+  Musclecells = c("TTN","DES","ACTA1")
+)
+
+d1 <- DotPlot(SCC,
+              features = markergenes,
+              group.by = "CellType_SCTccmito_harmony_zoom0",
+              col.min = NULL,
+              col.max = NULL,
+              assay = "RNA") + 
+  labs(x="",y="") + 
+  theme_jb() +
+  theme(strip.text.x = element_text(size=11, angle=90, hjust=0,vjust=.5))
+
+#code for changing colors of facets from https://github.com/tidyverse/ggplot2/issues/2096 
+colors <- rev(scales::hue_pal()(length(levels(SCC$CellType_SCTccmito_harmony_zoom0))))
+names(colors) <- rev(levels(SCC$CellType_SCTccmito_harmony_zoom0))
+colors <- append(colors,c("Regulatory T-Cells"=as.vector(colors[which(names(colors)=="T-Cells")])),after = which(names(colors)=="T-Cells"))
+
+d1g <- ggplot_gtable(ggplot_build(d1))
+strip_both <- which(grepl('strip-', d1g$layout$name))
+fills <- c(colors)
+k <- 1
+for (i in strip_both) {
+  j <- which(grepl('rect', d1g$grobs[[i]]$grobs[[1]]$childrenOrder))
+  d1g$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+  k <- k+1
+}
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-markerdotplots.svg"),grid.draw(d1g),width = 12,height = 6)
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfiltnod.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfiltnod-sessionInfo.txt"))
+```

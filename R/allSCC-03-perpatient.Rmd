@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 library(Seurat)
 library(ggplot2)
+library(ggrepel)
 library(ComplexHeatmap)
 library(RColorBrewer)
 
@@ -231,10 +232,10 @@ for (p in patient) {
     labs(x="UMAP_1",y="UMAP_2",title=p) +
     theme_jb_nogrid()
   UMAP.SCTccmito.epitype[[p]] <- DimPlot(SCC.p[[p]], 
-                                     reduction = "umap_SCTccmito", 
-                                     pt.size = 1, 
-                                     label = F, 
-                                     group.by = "epitype") + 
+                                         reduction = "umap_SCTccmito", 
+                                         pt.size = 1, 
+                                         label = F, 
+                                         group.by = "epitype") + 
     labs(x="UMAP_1",y="UMAP_2",title=p) +
     theme_jb_nogrid()
   
@@ -346,12 +347,12 @@ for (p in names(SCC.p)) {
   expr.RNAscaledata.hl.all[[p]] <- expr.RNAscaledata[[p]][as.character(highlightgenes$genes),]
   
   
-#set colorbreaks as above
+  #set colorbreaks as above
   colorbreaks.RNAscaledata.hl[[p]] <- c(-max(abs(expr.RNAscaledata.hl[[p]])),
-                                   -(mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0])),
-                                   0,
-                                   mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]),
-                                   max(abs(expr.RNAscaledata.hl[[p]])))
+                                        -(mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0])),
+                                        0,
+                                        mean(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl[[p]]))[unlist(abs(expr.RNAscaledata.hl[[p]]))!=0]),
+                                        max(abs(expr.RNAscaledata.hl[[p]])))
   
   #Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
   diffexprhm.hl[[p]] <- Heatmap(expr.RNAscaledata.hl[[p]],
@@ -517,7 +518,7 @@ SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="13"] <- "pEMT-7"
 SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="14"] <- "pEMT-8"
 SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="15"] <- "epi-4"
 SCC.p$HN01$pattumortype[SCC.p$HN01$pattumortype=="16"] <- "epi-5"
-  
+
 SCC.p$HN07$pattumortype <- as.character(SCC.p$HN07$seurat_clusters_perpat_SCTccmito_PCA)
 SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="0"] <- "hypoxia-pEMT"
 SCC.p$HN07$pattumortype[SCC.p$HN07$pattumortype=="1"] <- "pEMT-stress-1"
@@ -654,42 +655,42 @@ names(rowpats) <- rownames(cosinesim.tt)
 row_anno <- rowAnnotation(foo = anno_mark(at = which(rowpats %in% c("HN01")),labels = sub("_HN01","",rownames(cosinesim.tt)[rowpats %in% c("HN01")]),side = "left"),
                           annotation_name_gp = gpar(fontsize=11))
 bottom_anno <- columnAnnotation(foo = anno_mark(at = which(rowpats %in% c("1")),labels = sub("_1","",rownames(cosinesim.tt)[rowpats %in% c("1")]),side = "bottom"),
-                          annotation_name_gp = gpar(fontsize=11))
+                                annotation_name_gp = gpar(fontsize=11))
 
 cosinesim.tt.hm.pub.tri <- Heatmap(cosinesim.tt,
-                                       name="cosine similarity",
-                                       col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
-                                       show_column_names = F,
-                                       show_row_names = F,
-                                       cluster_rows = T,
-                                       clustering_distance_rows = "manhattan",
-                                       clustering_method_rows = "ward.D2",
-                                       row_dend_reorder = T,
-                                       cluster_columns = T,
-                                       clustering_distance_columns =  "manhattan",
-                                       clustering_method_columns = "ward.D2",
-                                       column_dend_reorder = T,
-                                       column_dend_side = "bottom",
-                                       rect_gp = gpar(type="none"),
-                                       cell_fun = function(j, i, x, y, w, h, fill) {
-                                         if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
-                                           grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
-                                         }
-                                       },
-                                       left_annotation = row_anno,
-                                       bottom_annotation = bottom_anno,
-                                       #graphic options
-                                       show_row_dend = F,
-                                       column_title_rot = 90,
-                                       row_names_gp = gpar(fontsize=11),
-                                       column_names_gp = gpar(fontsize=11),
-                                       row_title_gp = gpar(fontsize=11),
-                                       heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                                       border = F,
-                                       column_dend_height = unit(0.2,"in"),
-                                       row_dend_width = unit(0.2,"in"),
-                                       width = unit(6,"in"),
-                                       height = unit(6,"in")
+                                   name="cosine similarity",
+                                   col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
+                                   show_column_names = F,
+                                   show_row_names = F,
+                                   cluster_rows = T,
+                                   clustering_distance_rows = "manhattan",
+                                   clustering_method_rows = "ward.D2",
+                                   row_dend_reorder = T,
+                                   cluster_columns = T,
+                                   clustering_distance_columns =  "manhattan",
+                                   clustering_method_columns = "ward.D2",
+                                   column_dend_reorder = T,
+                                   column_dend_side = "bottom",
+                                   rect_gp = gpar(type="none"),
+                                   cell_fun = function(j, i, x, y, w, h, fill) {
+                                     if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
+                                       grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
+                                     }
+                                   },
+                                   left_annotation = row_anno,
+                                   bottom_annotation = bottom_anno,
+                                   #graphic options
+                                   show_row_dend = F,
+                                   column_title_rot = 90,
+                                   row_names_gp = gpar(fontsize=11),
+                                   column_names_gp = gpar(fontsize=11),
+                                   row_title_gp = gpar(fontsize=11),
+                                   heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                   border = F,
+                                   column_dend_height = unit(0.2,"in"),
+                                   row_dend_width = unit(0.2,"in"),
+                                   width = unit(6,"in"),
+                                   height = unit(6,"in")
 )
 
 pdf(paste0(OUTPUT,"figs/alltumor-perpatients-SCTccmito-pattumortype-cosinesim-pub-tri.pdf"), width=20, height=20)
@@ -697,37 +698,37 @@ cosinesim.tt.hm.pub.tri
 dev.off()
 
 cosinesim.tt.hm.pub.tri.n <- Heatmap(cosinesim.tt,
-                                       name="cosine similarity",
-                                       col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
-                                       show_column_names = F,
-                                       show_row_names = T,row_names_side = "left",
-                                       cluster_rows = T,
-                                       clustering_distance_rows = "manhattan",
-                                       clustering_method_rows = "ward.D2",
-                                       row_dend_reorder = T,
-                                       cluster_columns = T,
-                                       clustering_distance_columns =  "manhattan",
-                                       clustering_method_columns = "ward.D2",
-                                       column_dend_reorder = T,
-                                       column_dend_side = "bottom",
-                                       rect_gp = gpar(type="none"),
-                                       cell_fun = function(j, i, x, y, w, h, fill) {
-                                         if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
-                                           grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
-                                         }
-                                       },
-                                       #graphic options
-                                       show_row_dend = F,
-                                       column_title_rot = 90,
-                                       row_names_gp = gpar(fontsize=9),
-                                       column_names_gp = gpar(fontsize=11),
-                                       row_title_gp = gpar(fontsize=11),
-                                       heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
-                                       border = F,
-                                       column_dend_height = unit(0.2,"in"),
-                                       row_dend_width = unit(0.2,"in"),
-                                       width = unit(8,"in"),
-                                       height = unit(8,"in")
+                                     name="cosine similarity",
+                                     col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
+                                     show_column_names = F,
+                                     show_row_names = T,row_names_side = "left",
+                                     cluster_rows = T,
+                                     clustering_distance_rows = "manhattan",
+                                     clustering_method_rows = "ward.D2",
+                                     row_dend_reorder = T,
+                                     cluster_columns = T,
+                                     clustering_distance_columns =  "manhattan",
+                                     clustering_method_columns = "ward.D2",
+                                     column_dend_reorder = T,
+                                     column_dend_side = "bottom",
+                                     rect_gp = gpar(type="none"),
+                                     cell_fun = function(j, i, x, y, w, h, fill) {
+                                       if(as.numeric(x) <= 1 - as.numeric(y) + 1e-6) {
+                                         grid.rect(x, y, w, h, gp = gpar(fill = fill, col = fill))
+                                       }
+                                     },
+                                     #graphic options
+                                     show_row_dend = F,
+                                     column_title_rot = 90,
+                                     row_names_gp = gpar(fontsize=9),
+                                     column_names_gp = gpar(fontsize=11),
+                                     row_title_gp = gpar(fontsize=11),
+                                     heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                     border = F,
+                                     column_dend_height = unit(0.2,"in"),
+                                     row_dend_width = unit(0.2,"in"),
+                                     width = unit(8,"in"),
+                                     height = unit(8,"in")
 )
 
 pdf(paste0(OUTPUT,"figs/alltumor-perpatients-SCTccmito-pattumortype-cosinesim-pub-tri-name.pdf"), width=20, height=20)
@@ -770,6 +771,205 @@ cosclus.is.norm.filt <- lapply(cosclus.is.norm, function(x) x[x>=0.5])
 cosclus.is.norm.filt
 ```
 
+## Differential expression within patient
+
+```{r}
+# foldchange between primary and metastatic tumor samples within samples
+calc_Lok_withinpat <- function(Seuratobject, types,noofgenes) {
+  Idents(Seuratobject) <- as.character(Seuratobject$Lok)
+  marker.Lok <- FoldChange(Seuratobject, 
+                           features = NULL,
+                           pseudocount.use = 1,
+                           ident.1 = "PT", 
+                           ident.2 = "MET",
+                           assay = "RNA",
+                           slot = "data")
+  marker.Lok$gene <- rownames(marker.Lok)
+  
+  vol <- list()
+  vol[["allcells"]] <- ggvolcano(marker.Lok,
+                                 cutoff = c(sort(marker.Lok$avg_log2FC, decreasing = F)[noofgenes+1],
+                                            sort(marker.Lok$avg_log2FC, decreasing = T)[noofgenes+1]),
+                                 onlypos = F,
+                                 pctdiff = F) +
+    ggtitle("allcells")
+  
+  # separately for every epitype
+  SCC.p.type <- list()
+  marker.Loktype <- list()
+  vol.Loktype <- list()
+  for (type in types) {
+    SCC.p.type[[type]] <- subset(Seuratobject,cells=colnames(Seuratobject)[grep(type,Seuratobject$pattumortype)])
+    Idents(SCC.p.type[[type]]) <- as.character(SCC.p.type[[type]]$Lok)
+    marker.Loktype[[type]] <- FoldChange(SCC.p.type[[type]], 
+                                         features = NULL,
+                                         pseudocount.use = 1,
+                                         ident.1 = "PT", 
+                                         ident.2 = "MET",
+                                         assay = "RNA",
+                                         slot = "data")
+    marker.Loktype[[type]]$gene <- rownames(marker.Loktype[[type]])
+    
+    vol[[type]] <-  ggvolcano(marker.Loktype[[type]],
+                              cutoff = c(sort(marker.Loktype[[type]]$avg_log2FC, decreasing = F)[noofgenes+1],
+                                         sort(marker.Loktype[[type]]$avg_log2FC, decreasing = T)[noofgenes+1]),
+                              onlypos = F,
+                              pctdiff = F) +
+      ggtitle(type)
+  }
+  return(vol)
+}
+
+volplot.2 <- calc_Lok_withinpat(SCC.p$`2`,c("pEMT"),10)
+volplot.7 <- calc_Lok_withinpat(SCC.p$`7`,c("pEMT","epi"),10)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient2-SCTccmito-volcanoplot-allcells.svg"),volplot.2$allcells, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient2-SCTccmito-volcanoplot-allcells-noleg.svg"),volplot.2$allcells + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient2-SCTccmito-volcanoplot-pEMT.svg"),volplot.2$pEMT, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient2-SCTccmito-volcanoplot-pEMT-noleg.svg"),volplot.2$pEMT + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+
+ggsave(filename = paste0(OUTPUT,"figs/patient7-SCTccmito-volcanoplot-allcells.svg"),volplot.7$allcells, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient7-SCTccmito-volcanoplot-allcells-noleg.svg"),volplot.7$allcells + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient7-SCTccmito-volcanoplot-epi.svg"),volplot.7$epi, width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/patient7-SCTccmito-volcanoplot-epi-noleg.svg"),volplot.7$epi + theme(legend.position = "none") + ggtitle(""), width=5, height=5)
+```
+```{r}
+volplot.2
+```
+```{r}
+volplot.7
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+library(fgsea)
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+GS <- c(GOBP,HM)
+
+calc_GSEA_Loktype <- function(Seuratobject,types) {
+  marker.Lok <- list()
+  
+  Idents(Seuratobject) <- as.character(Seuratobject$Lok)
+  marker.Lok[["allcells"]] <- FoldChange(Seuratobject, 
+                                         features = NULL,
+                                         pseudocount.use = 1,
+                                         ident.1 = "PT", 
+                                         ident.2 = "MET",
+                                         assay = "RNA",
+                                         slot = "data")
+  marker.Lok[["allcells"]]$gene <- rownames(marker.Lok[["allcells"]])
+  
+  # separately for every type
+  SCC.p.type <- list()
+  vol.Loktype <- list()
+  for (type in types) {
+    SCC.p.type[[type]] <- subset(Seuratobject,cells=colnames(Seuratobject)[Seuratobject$pattumortype==type])
+    Idents(SCC.p.type[[type]]) <- as.character(SCC.p.type[[type]]$Lok)
+    marker.Lok[[type]] <- FoldChange(SCC.p.type[[type]], 
+                                     features = NULL,
+                                     pseudocount.use = 1,
+                                     ident.1 = "PT", 
+                                     ident.2 = "MET",
+                                     assay = "RNA",
+                                     slot = "data")
+    marker.Lok[[type]]$gene <- rownames(marker.Lok[[type]])
+  }
+  
+  #GSEA
+  FCranks <- list()
+  GS.gsea <- list()
+  for (type in names(marker.Lok)) {
+    #rank DGE results by foldchange
+    FCranks[[type]] <- marker.Lok[[type]]$avg_log2FC
+    names(FCranks[[type]]) <- marker.Lok[[type]]$gene
+    #convert -Inf to -1000
+    FCranks[[type]][is.infinite(FCranks[[type]])] <- -1000
+    
+    #run fgsea
+    GS.gsea[[type]] <- fgsea(pathways=GS,
+                             stats=FCranks[[type]],
+                             minSize=15,
+                             maxSize=500,
+                             nperm=10000)
+  }
+  return(GS.gsea)
+}
+
+plotGSEA <- function(GS.gsea,fileid) {
+  #plot GSEA
+  #remove GO in name and put to lower cases
+  GS.gsea.p <- lapply(GS.gsea,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+  #abbreviate some GO terms
+  GS.gsea.p <- lapply(GS.gsea.p,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                               gsub("nonsense mediated decay","NMD",x$pathway)); x})
+  #Plotting
+  GS.gseavis.pos <- lapply(names(GS.gsea.p), function(x) try(GSEAvis(GSEAdf = GS.gsea.p[[x]],
+                                                                     pvalthres = NULL,
+                                                                     NESthres = NULL,
+                                                                     npathways = 5,
+                                                                     sort = "NES",
+                                                                     positive = T) +
+                                                               labs(x=x,y="") +
+                                                               scale_fill_gradientn(limits = c(0,-log10(min(c(unlist(lapply(GS.gsea.p, function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$padj[1:5]})),
+                                                                                                              unlist(lapply(GS.gsea.p, function(x) {y <- x[x$NES<0,]; y[order(y$NES,decreasing = F),]$padj[1:5]})))))),colours = c("white","blue")) +
+                                                               coord_flip(ylim = c(min(unlist(lapply(GS.gsea.p,function(x) {y <- x[x$NES<0,]; y[order(y$NES,decreasing = F),]$NES[1:5]}))),
+                                                                                   max(unlist(lapply(GS.gsea.p,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$NES[1:5]}))))) +
+                                                               scale_y_continuous(breaks = seq(-10,10,0.5))
+  ))
+  GS.gseavis.neg <- lapply(names(GS.gsea.p), function(x) try(GSEAvis(GSEAdf = GS.gsea.p[[x]],
+                                                                     pvalthres = NULL,
+                                                                     NESthres = NULL,
+                                                                     npathways = 5,
+                                                                     sort = "NES",
+                                                                     positive = F) +
+                                                               labs(x=x,y="") +
+                                                               scale_fill_gradientn(limits = c(0,-log10(min(c(unlist(lapply(GS.gsea.p, function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$padj[1:5]})),
+                                                                                                              unlist(lapply(GS.gsea.p, function(x) {y <- x[x$NES<0,]; y[order(y$NES,decreasing = F),]$padj[1:5]})))))),colours = c("white","blue")) +
+                                                               coord_flip(ylim = c(min(unlist(lapply(GS.gsea.p,function(x) {y <- x[x$NES<0,]; y[order(y$NES,decreasing = F),]$NES[1:5]}))),
+                                                                                   max(unlist(lapply(GS.gsea.p,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$NES[1:5]}))))) +
+                                                               scale_y_continuous(breaks = seq(-10,10,0.5))
+  ))
+  names(GS.gseavis.pos) <- paste0(names(GS.gsea.p),"-pos")
+  names(GS.gseavis.pos) <- paste0(names(GS.gsea.p),"-neg")
+  
+  GS.gseavis <- c(GS.gseavis.pos,GS.gseavis.neg)
+  
+  #All GSEA Plots in one file
+  library(cowplot)
+  GS.gseavis.comb <- lapply(1:(length(GS.gseavis)-1), function(x) {
+    GS.gseavis[[x]] + 
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+  })
+  GS.gseavis.comb[[length(GS.gseavis.comb)+1]] <- GS.gseavis[[length(GS.gseavis)]]
+  try(ggsave(filename = paste0(OUTPUT,"figs/",fileid,"-GSEA-SCTccmito-all.svg"),
+             plot_grid(plotlist = GS.gseavis.comb,ncol=1,align = "v",labels=NULL),
+             width=5, 
+             height=5))
+  
+  try(ggsave(filename = paste0(OUTPUT,"figs/",fileid,"-GSEA-SCTccmito-all-noleg.svg"),
+             plot_grid(plotlist = lapply(GS.gseavis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+             width=5, 
+             height=5))
+  
+  GS.gseavis.comb <- lapply(1:(length(GS.gseavis)), function(x) {
+    GS.gseavis[[x]] + 
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+  })
+  try(ggsave(filename = paste0(OUTPUT,"figs/",fileid,"-GSEA-SCTccmito-all-nolegaxis.svg"),
+             plot_grid(plotlist = lapply(GS.gseavis.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+             width=5, 
+             height=5))
+}
+  
+GSEAres.7 <- calc_GSEA_Loktype(SCC.p$`7`,c("epi"))
+GSEAres.2 <- calc_GSEA_Loktype(SCC.p$`2`,c("pEMT"))
+
+plotGSEA(GSEAres.7,"patient7")
+plotGSEA(GSEAres.2,"patient2")
+```
 ## Save 
 
 ```{r}

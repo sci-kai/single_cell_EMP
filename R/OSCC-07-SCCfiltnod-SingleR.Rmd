@@ -1,0 +1,133 @@
+---
+title: "SingleR"
+author: "Kai"
+date: "15th March 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(SingleR)
+library(celldex)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfiltnod.RData"))
+```
+
+# Clustering for Celltype Annotation
+
+```{r}
+DefaultAssay(SCC) <- "SCTccmito"
+numberofPCs <- 20
+#clustering for resolution 100
+SCC <- FindNeighbors(SCC,
+                     dims = 1:numberofPCs,
+                     reduction = "pca_SCTccmito",
+                     assay = "SCTccmito")
+SCC <- FindClusters(SCC,
+                    resolution = 100,
+                    random.seed = 100)
+
+SCC$seurat_clusters_allnod_SCTccmito_PCA_res100 <- SCC$seurat_clusters
+SCC$seurat_clusters <- NULL
+
+# plot
+umap.SCTccmito.clusPCAres100 <- DimPlot(SCC,
+                                        reduction = "umap_SCTccmito",
+                                        pt.size = 1,
+                                        label = F,
+                                        group.by = "seurat_clusters_allnod_SCTccmito_PCA_res100") + 
+  labs(title=NULL) +
+  theme_jb_nogrid() + 
+  theme(legend.position = "none")
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-clusPCA-res100-noleg.png"),umap.SCTccmito.clusPCAres100, width = 5, height = 5)
+
+umap.SCTccmito.clusPCAres100
+```
+
+# SingleR Annotation
+
+## Load Reference set
+
+```{r}
+monaco.ref <- MonacoImmuneData()
+```
+
+## SingleR for high resolution cluster
+
+```{r}
+# run singleR
+predclus.monaco <- SingleR(test = GetAssayData(SCC, slot = "data",assay = "SCTccmito"), 
+                           ref = monaco.ref, 
+                           assay.type.test = 1,
+                           clusters = SCC$seurat_clusters_allnod_SCTccmito_PCA_res100,
+                           labels = monaco.ref$label.fine)
+
+# add singleR annotations to the seurat object
+cluslabels.monaco <- predclus.monaco$labels
+names(cluslabels.monaco) <- rownames(predclus.monaco)
+
+SCC$SingleR.monaco.res100 <- cluslabels.monaco[match(SCC$seurat_clusters_allnod_SCTccmito_PCA_res100,names(cluslabels.monaco))]
+
+#plot it
+UMAP.SCTccmito.singleR_monaco_res100 <- DimPlot(SCC, 
+                                                reduction = "umap_SCTccmito", 
+                                                pt.size = 1, 
+                                                label = T, 
+                                                group.by = "SingleR.monaco.res100",
+                                                raster = T) +  
+  theme_jb_nogrid()
+UMAP.SCTccmito.singleR_monaco_res100.nol <- DimPlot(SCC, 
+                                                    reduction = "umap_SCTccmito", 
+                                                    pt.size = 1, 
+                                                    label = F, 
+                                                    group.by = "SingleR.monaco.res100",
+                                                raster = T) +  
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-SingleR-monaco_res100.svg"),UMAP.SCTccmito.singleR_monaco_res100, width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-SingleR-monaco_res100-noleg.svg"),UMAP.SCTccmito.singleR_monaco_res100 + theme(legend.position = "none"), width = 5, height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-SingleR-monaco_res100-nolabelleg.svg"),UMAP.SCTccmito.singleR_monaco_res100.nol + theme(legend.position = "none"), width = 5, height = 5)
+
+UMAP.SCTccmito.singleR_monaco_res100
+```
+
+```{r}
+#all types separately
+UMAP.SCTccmito.singleR_monaco_res100.type <- list()
+for (type in unique(SCC$SingleR.monaco.res100)) {
+  SCC <- AddMetaData(SCC, SCC$SingleR.monaco.res100 == type, col.name = paste0("SingleR.monaco.res100.",type))
+  
+  UMAP.SCTccmito.singleR_monaco_res100.type[[type]] <- DimPlot(SCC, 
+                                                               reduction = "umap_SCTccmito", 
+                                                               pt.size = 1, 
+                                                               label = F, 
+                                                               order = "TRUE",
+                                                               cols = c("grey95","blue"),
+                                                               group.by = paste0("SingleR.monaco.res100.",gsub("-",".",gsub(" ",".",gsub("/",".",type))))) +  
+    ggtitle(type) +
+    theme_jb_nogrid()
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfiltnod-all-SCTccmito-UMAP-SingleR-monaco-res100-",gsub("-",".",gsub(" ",".",gsub("/",".",type))),"-noleg.png"),UMAP.SCTccmito.singleR_monaco_res100.type[[type]] + theme(legend.position = "none"), width = 5, height = 5)
+}
+
+UMAP.SCTccmito.singleR_monaco_res100.type
+```
+
+# Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfiltnod-all-SingleR.RData"),SCC,predclus.monaco)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfiltnod-all-SingleR-sessionInfo.txt"))
+```

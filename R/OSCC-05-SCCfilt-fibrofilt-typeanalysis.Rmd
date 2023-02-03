@@ -1,0 +1,476 @@
+---
+title: "Downstream - Subsetting"
+author: "Kai"
+date: "10th May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(fgsea)
+library(cowplot)
+library(dplyr)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+```
+
+# Load Seurat Object from preprocessing
+
+```{r}
+load(paste0(OUTPUT,"RData/SCCfilt-fibrofilt.RData"))
+```
+
+## Annotation
+
+```{r}
+SCC.fibro$fibrotype <- as.character(SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res3)
+SCC.fibro$fibrotype[SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res15=="42"] <- "Myoblasts"
+SCC.fibro$fibrotype[SCC.fibro$seurat_clusters_fibro_SCTccmito_PCA_harmony_res15=="60"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="0"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="1"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="2"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="3"] <- "Myofibroblasts"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="4"] <- "Immune"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="5"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="6"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="7"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="8"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="9"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="10"] <- "Immune"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="11"] <- "Immune"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="12"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="13"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="14"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="15"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="16"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="17"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="18"] <- "FRCs"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="19"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="20"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="21"] <- "ECM"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="22"] <- "Immune"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="23"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="24"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="25"] <- "Pericytes"
+SCC.fibro$fibrotype[SCC.fibro$fibrotype=="26"] <- "ECM"
+
+SCC.fibro$fibrotype <- factor(SCC.fibro$fibrotype,levels = c("ECM","Immune","FRCs","Myofibroblasts","Pericytes","Myoblasts"))
+
+umapharmony.SCTccmito.fibrotype <- DimPlot(SCC.fibro,
+                                           reduction="humap_SCTccmito",
+                                           pt.size = 1,
+                                           label = T,
+                                           group.by = "fibrotype") + 
+  labs(x="UMAP_1",y="UMAP_2") +
+  theme_jb_nogrid()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-SCTccmito-UMAPharmony-fibrotype-noleg.svg"),umapharmony.SCTccmito.fibrotype + theme(legend.position = "none") + ggtitle(NULL), width=5, height=5)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-SCTccmito-UMAPharmony-fibrotype.svg"),umapharmony.SCTccmito.fibrotype, width=5, height=5)
+
+umapharmony.SCTccmito.fibrotype + theme(legend.position = "none")
+```
+
+```{r}
+sampleLoks <- unique(paste0(SCC.fibro$sample,"-",sub("LN-MET","MET",SCC.fibro$Lok)))
+names(sampleLoks) <- unlist(lapply(strsplit(sampleLoks,split = "-"),function(x) x[1]))
+sampleLoks <- unlist(lapply(strsplit(sampleLoks,split = "-"),function(x) x[2]))
+#without negative
+sampleLoks <- sampleLoks[sampleLoks!="NA"]
+#order
+sampleLoks <- sampleLoks[rev(order(names(sampleLoks)))]
+```
+
+```{r}
+cellfrac.scRNA <- do.call(rbind,lapply(levels(SCC.fibro$sample)[levels(SCC.fibro$sample) %in% unique(SCC.fibro$sample)],function(x) table(SCC.fibro$fibrotype[SCC.fibro$sample==x])))
+rownames(cellfrac.scRNA) <- levels(SCC.fibro$sample)[levels(SCC.fibro$sample) %in% unique(SCC.fibro$sample)]
+#filter for doublets and negatives
+cellfrac.scRNA <- cellfrac.scRNA[-which(rownames(cellfrac.scRNA) %in% c("Doublet","Negative")),]
+#fractions
+cellfrac.scRNA <- cellfrac.scRNA / rowSums(cellfrac.scRNA)
+
+sampleorder <- rev(rownames(cellfrac.scRNA))
+
+#stacked barplot of tumor phenotypes
+cellfrac.scRNA.forbp <- cellfrac.scRNA
+rownames(cellfrac.scRNA.forbp) <- paste0(rownames(cellfrac.scRNA.forbp),"-",sampleLoks[rownames(cellfrac.scRNA.forbp)])
+
+cellfrac.scRNA.bp <- ggplot(data=reshape2::melt(cellfrac.scRNA.forbp)) +
+  geom_bar(aes(x=factor(Var1,levels = paste0(names(sampleLoks),"-",sampleLoks)),
+               y=value,
+               fill=Var2),
+           stat="identity",
+           position = "stack") + #position_fill(reverse = T)) +
+  scale_y_continuous(breaks = seq(0,1,0.1)) +
+  #scale_fill_manual(values = clustercolors) +
+  labs(x="",y="fraction",fill="types") +
+  coord_flip(ylim = c(0,1)) +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-fibrotype-scRNA-bp.svg"),cellfrac.scRNA.bp, width=3.5, height=3.5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-fibrotype-scRNA-bp-noleg.svg"),cellfrac.scRNA.bp + theme(legend.position = "none") + ggtitle(NULL), width=3, height=3.5)
+
+sampleLok.t <- as.data.frame(table(paste0(SCC.fibro$sample,"-",sub("LN-MET","MET",SCC.fibro$Lok))))
+sampleLok.t$Lok <- unlist(lapply(strsplit(as.character(sampleLok.t$Var1),split = "-"),function(x) x[2]))
+#remove negatives
+sampleLok.t <- sampleLok.t[sampleLok.t$Var1!="Negative-NA",]
+sampleLok.t$Lok <- factor(sampleLok.t$Lok,levels = c("PT","MET","LN"))
+sampleLok.t$Var1 <- factor(sampleLok.t$Var1,levels = rev(levels(factor(sampleLok.t$Var1))))
+
+#number of cells per patientlok
+sampleLok.p <- ggplot(data=sampleLok.t) +
+  geom_bar(aes(x=Var1,
+               y=Freq,
+               fill=Lok),
+           stat="identity",
+           position="stack") +
+  labs(x="",y="number of cells",fill="Lok") +
+  scale_y_continuous(breaks = seq(0,2000,250)) +
+  scale_fill_brewer(palette = "Set1") +
+  coord_flip() +
+  theme_jb()
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibro-sampleLok-table.svg"),sampleLok.p, width=5, height=4)
+
+library(cowplot)
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrotype-overviewplot.svg"),
+       plot_grid(plotlist = list(
+         cellfrac.scRNA.bp + theme(panel.grid.minor.x = element_blank(),legend.position = "none"),
+         sampleLok.p + theme(axis.text.y = element_blank(),axis.ticks.y = element_blank(),legend.position = "none")),
+         ncol=2,nrow=1,align = "h",labels=NULL,axis = "rlbt",rel_widths = c(3.5,1)),
+       width=5,height=4.5)
+```
+
+```{r}
+Lokfrac.scRNA <- lapply(unique(sampleLoks),function(x) {
+  #get samples for specific Lok
+  samplenames <- names(sampleLoks[sampleLoks==x])
+  #calculate percentage of cells per lokalisation
+  colMeans(cellfrac.scRNA[samplenames,])
+})
+names(Lokfrac.scRNA) <- unique(sampleLoks)
+Lokfrac.scRNA <- do.call(rbind,Lokfrac.scRNA)
+
+library(ggplot2)
+scRNA.pie.PT <- ggplot(data=data.frame(value=Lokfrac.scRNA["PT",],Var=factor(colnames(Lokfrac.scRNA),levels=colnames(Lokfrac.scRNA))),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  coord_polar("y",start=0) +
+  theme_void()
+scRNA.pie.LNMET <- ggplot(data=data.frame(value=Lokfrac.scRNA["MET",],Var=factor(colnames(Lokfrac.scRNA),levels=colnames(Lokfrac.scRNA))),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  coord_polar("y",start=0) +
+  theme_void()
+scRNA.pie.LN <- ggplot(data=data.frame(value=Lokfrac.scRNA["LN",],Var=factor(colnames(Lokfrac.scRNA),levels=colnames(Lokfrac.scRNA))),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  coord_polar("y",start=0) +
+  theme_void()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-fibrotype-scRNA-pie-PT.svg"),scRNA.pie.PT,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-fibrotype-scRNA-pie-LNMET.svg"),scRNA.pie.LNMET,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-fibrotype-scRNA-pie-LN.svg"),scRNA.pie.LN,width = 5,height = 5)
+```
+
+# Check several interesting genes
+
+## Scores, Heatmaps, Dotplots of several genes / gene signatures
+
+```{r}
+#set expression matrices and annotation objects for all Heatmaps
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC.fibro, assay = "RNA", slot = "scale.data"))
+genesofinterest <- list()
+genesofinterest[["collagens"]] <- grep("^COL",rownames(SCC.fibro),value = T)
+genesofinterest[["cytokines"]] <- c(grep("^IL",rownames(SCC.fibro),value = T),grep("^IFN",rownames(SCC.fibro),value = T),csfs <- grep("^CSF",rownames(SCC.fibro),value = T),"TNF")
+genesofinterest[["chemokines"]] <- c(grep("^CXCL",rownames(SCC.fibro),value = T),grep("^CCL",rownames(SCC.fibro),value = T))
+genesofinterest[["MHCII"]] <- c(grep("^HLA",rownames(SCC.fibro),value = T))
+
+expr.RNAscaledata.goi <- list()
+colorbreaks.RNAscaledata.goi <- list()
+goi.hm <- list()
+for (g in names(genesofinterest)) {
+  expr.RNAscaledata.goi[[g]] <- list()
+  colorbreaks.RNAscaledata.goi[[g]] <- list()
+  goi.hm[[g]] <- list()
+  
+  #Heatmaps
+  expr.RNAscaledata.goi[[g]] <- expr.RNAscaledata[genesofinterest[[g]],]
+  #set colorbreaks
+  colorbreaks.RNAscaledata.goi[[g]] <- c(-max(abs(expr.RNAscaledata.goi[[g]])),
+                                         -(mean(unlist(abs(expr.RNAscaledata.goi[[g]]))[unlist(abs(expr.RNAscaledata.goi[[g]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.goi[[g]]))[unlist(abs(expr.RNAscaledata.goi[[g]]))!=0])),
+                                         0,
+                                         mean(unlist(abs(expr.RNAscaledata.goi[[g]]))[unlist(abs(expr.RNAscaledata.goi[[g]]))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.goi[[g]]))[unlist(abs(expr.RNAscaledata.goi[[g]]))!=0]),
+                                         max(abs(expr.RNAscaledata.goi[[g]])))
+  
+  if(g=="collagens") {rownames(expr.RNAscaledata.goi[[g]]) <- sub("COL","",rownames(expr.RNAscaledata.goi[[g]]))}
+  goi.hm[[g]] <- Heatmap(expr.RNAscaledata.goi[[g]],
+                         name="scale.data",
+                         col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.goi[[g]], colors = c("red","purple", "black", "yellow","white")),
+                         show_column_names = F,
+                         show_row_names = T,
+                         cluster_columns = T,
+                         cluster_column_slices = F,
+                         clustering_method_columns = "ward.D2",
+                         clustering_distance_columns = "euclidean",
+                         column_split = SCC.fibro@meta.data[,"fibrotype"],
+                         cluster_rows = T,
+                         clustering_method_rows = "ward.D2",
+                         clustering_distance_rows = "euclidean",
+                         row_title_rot = 0,
+                         column_title_rot = 90,
+                         #graphic options
+                         row_names_gp = gpar(fontsize=8),
+                         column_names_gp = gpar(fontsize=11),
+                         row_title_gp = gpar(fontsize=11),
+                         column_title_gp = gpar(fontsize=11),
+                         heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                         border = T,
+                         use_raster = T,
+                         raster_device = "CairoPNG",
+                         raster_quality = 4,
+                         heatmap_height = unit(7,"in"),
+                         heatmap_width = unit(7,"in"))
+  
+  pdf(paste0(OUTPUT,"figs/SCCfilt-fibrofilt-SCTccmito-fibrotype-HM-RNAscaledata-",g,".pdf"), width=20, height=20)
+  print(goi.hm[[g]])
+  dev.off()
+}
+
+genesofinterest[["markers"]] <- list(
+  ECM=c("MMP11","MMP1"),
+  Immune=c(paste0("CXCL",c(1,2,3,8,9,10,11,12,13,14)),"CCL2","CCL8","CCL19","CCL21","C3","C7","CFD","IL6","PLA2G2A","APOD","APOE"),
+  Myofibroblasts=c("ACTA2","ACTG2","MYH11"),
+  Pericytes=c("RGS5"),
+  Myoblasts=c("MYF5","MYF6","DES","CHRDL2"))
+
+#DotPlot
+d1 <- DotPlot(SCC.fibro,
+              features = genesofinterest[["markers"]],
+              group.by = "fibrotype",
+              col.min = NULL,
+              col.max = NULL,
+              assay = "RNA") +
+  labs(x="",y="") + 
+  theme_jb() +
+  theme(strip.text.x = element_text(size=11, angle=90, hjust=0,vjust=.5))
+
+#code for changing colors of facets from https://github.com/tidyverse/ggplot2/issues/2096 
+colors <- scales::hue_pal()(length(levels(SCC.fibro$fibrotype)))[-3]
+names(colors) <- levels(SCC.fibro$fibrotype)[-3]
+
+d1g <- ggplot_gtable(ggplot_build(d1))
+strip_both <- which(grepl('strip-', d1g$layout$name))
+fills <- c(colors)
+k <- 1
+for (i in strip_both) {
+  j <- which(grepl('rect', d1g$grobs[[i]]$grobs[[1]]$childrenOrder))
+  d1g$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+  k <- k+1
+}
+
+ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-SCTccmito-fibrotype-DotPlot-marker.svg"),grid.draw(d1g),
+       width = 8,
+       height = 4)
+```
+
+# Differential expression
+
+```{r}
+SCC.fibro.fibrotype <- calculate_foldchanges(SCC.fibro,SCC.fibro$fibrotype)
+#filter for genes with low foldchanges and pct value. This improves GSEA analysis because genes suffering from high dropout (i.e., lowly expressed and low signal) are not considered for ranking, while most up/downregulated genes are still preserved. These are also default values for "FindAllMarkers" function
+SCC.fibro.fibrotype <- SCC.fibro.fibrotype[(SCC.fibro.fibrotype$pct.1 > 0.1 | SCC.fibro.fibrotype$pct.2 > 0.1) & abs(SCC.fibro.fibrotype$avg_log2FC)>0.25,]
+```
+
+## Volcano Plots 
+
+```{r}
+#set thres function for selecting genes to mark in volcano plot
+logFCcutoff_fibrotype = function(x) {
+  c(sort(SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,]$avg_log2FC, decreasing = T)[11])
+}
+pctdiffcutoff_fibrotype = function(x) {
+  c(sort(SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,]$pct.1 - SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,]$pct.2, decreasing = T)[21])
+}
+
+#create volcano plots with pct difference on y-axis
+SCC.fibro.fibrotype.volpct <- lapply(levels(SCC.fibro.fibrotype$cluster), function(x) ggvolcano(SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,],logFCcutoff_fibrotype(x),onlypos = T,pctdiff = F) + ggtitle(x))
+names(SCC.fibro.fibrotype.volpct) <- levels(SCC.fibro.fibrotype$cluster)
+
+SCC.fibro.fibrotype.volpctdiff <- lapply(levels(SCC.fibro.fibrotype$cluster), function(x) ggvolcano(SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,],pctdiffcutoff_fibrotype(x),onlypos = T,pctdiff = T) + ggtitle(x))
+names(SCC.fibro.fibrotype.volpctdiff) <- levels(SCC.fibro.fibrotype$cluster)
+
+#save volcano plots
+for (i in names(SCC.fibro.fibrotype.volpct)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-volcanopct-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.fibro.fibrotype.volpct[[i]])
+}
+for (i in names(SCC.fibro.fibrotype.volpctdiff)) {
+  ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-volcanopctdiff-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",i)))),".svg"),SCC.fibro.fibrotype.volpctdiff[[i]])
+}
+
+SCC.fibro.fibrotype.volpct
+```
+
+## Gene Set Enrichment Analysis (GSEA)
+
+```{r}
+FCranks.fibrotype <- list()
+for (cl in unique(SCC.fibro.fibrotype$cluster)) {
+  #rank DGE results by foldchange
+  FCranks.fibrotype[[cl]] <- SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==cl,]$avg_log2FC
+  names(FCranks.fibrotype[[cl]]) <- SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==cl,]$gene
+  
+  #convert -Inf to -1000
+  FCranks.fibrotype[[cl]][is.infinite(FCranks.fibrotype[[cl]])] <- -1000
+}
+
+#read in MsigDB pathway from downloads, in this case GO: BP
+GOBP <- gmtPathways("~/tscr/kai/db/msigdb/c5.bp.v7.1.symbols.gmt")
+HM <- gmtPathways("~/tscr/kai/db/msigdb/h.all.v7.1.symbols.gmt")
+
+GS <- c(GOBP,HM)
+
+#run fgsea
+GS.gsea.fibrotype <- list()
+for (cl in levels(SCC.fibro.fibrotype$cluster)) {
+  GS.gsea.fibrotype[[cl]] <- fgsea(pathways=GS,
+                                   stats=FCranks.fibrotype[[cl]],
+                                   minSize=15,
+                                   maxSize=500,
+                                   nperm=10000)
+}
+
+#remove GO in name and put to lower cases
+GS.gsea.fibrotype.plot <- lapply(GS.gsea.fibrotype,function(x) {x$pathway <- gsub("_"," ",tolower(sub("GO_","",x$pathway))); x})
+#abbreviate some GO terms
+GS.gsea.fibrotype.plot <- lapply(GS.gsea.fibrotype.plot,function(x) {x$pathway <- gsub("endoplasmic reticulum","ER",
+                                                                                       gsub("nonsense mediated decay","NMD",x$pathway)); x})
+#Plotting
+numberofGS = 5
+
+GS.gseavis.fibrotype <- lapply(names(GS.gsea.fibrotype.plot), function(x) {
+  try(GSEAvis(GSEAdf = GS.gsea.fibrotype.plot[[x]],
+              pvalthres = NULL,
+              NESthres = NULL,
+              npathways = numberofGS,
+              sort = "NES",
+              positive = T) +
+        labs(x=x,y="") +
+        scale_fill_gradientn(limits = c(0,-log10(min(unlist(lapply(GS.gsea.fibrotype.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$padj[1:numberofGS]}))))),
+                             colours = c("white","blue")) +
+        coord_flip(ylim = c(0,max(unlist(lapply(GS.gsea.fibrotype.plot,function(x) {y <- x[x$NES>0,]; y[order(y$NES,decreasing = T),]$NES[1:numberofGS]}))))) +
+        scale_y_continuous(breaks = seq(0,20,0.5))
+  )}) 
+names(GS.gseavis.fibrotype) <- names(GS.gsea.fibrotype.plot)
+lapply(names(GS.gsea.fibrotype.plot), function(x) try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-GS-top",numberofGS,"byNES-",gsub("[/]","",sub(" ","",sub("[)]","",sub("[(]","",x)))),".svg"),GS.gseavis.fibrotype[[x]],width=10, height=5)))
+
+#All GSEA Plots in one file
+GS.gseavis.fibrotype.comb <- lapply(1:(length(GS.gseavis.fibrotype)-1), function(x) {
+  GS.gseavis.fibrotype[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+GS.gseavis.fibrotype.comb[[length(GS.gseavis.fibrotype.comb)+1]] <- GS.gseavis.fibrotype[[length(GS.gseavis.fibrotype)]]
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-GS-top",numberofGS,"byNES-all.svg"),
+           plot_grid(plotlist = GS.gseavis.fibrotype.comb,ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=5))
+
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-GS-top",numberofGS,"byNES-all-noleg.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.fibrotype.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=5))
+
+GS.gseavis.fibrotype.comb <- lapply(1:(length(GS.gseavis.fibrotype)), function(x) {
+  GS.gseavis.fibrotype[[x]] + 
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
+})
+try(ggsave(filename = paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-GS-top",numberofGS,"byNES-all-nolegaxis.svg"),
+           plot_grid(plotlist = lapply(GS.gseavis.fibrotype.comb,function(x) x + theme(legend.position = "none")),ncol=1,align = "v",labels=NULL),
+           width=5, 
+           height=5))
+```
+
+## Heatmap of top differentially expressed genes
+
+```{r}
+topgenes = 5
+
+#choose those top genes
+SCC.fibro.fibrotype.percluster <- lapply(unique(SCC.fibro.fibrotype$cluster), function(x) SCC.fibro.fibrotype[SCC.fibro.fibrotype$cluster==x,])
+names(SCC.fibro.fibrotype.percluster) <- unique(SCC.fibro.fibrotype$cluster)
+
+top.logFC.fibrotype <- list()
+highlightgenes.fibrotype <- list()
+for (cl in names(SCC.fibro.fibrotype.percluster)) {
+  #top avg FC
+  top.logFC.fibrotype[[cl]] <- head(SCC.fibro.fibrotype.percluster[[cl]][order(SCC.fibro.fibrotype.percluster[[cl]]$avg_log2FC,decreasing = T),]$gene, n=topgenes)
+  #create dataframe
+  highlightgenes.fibrotype[[cl]] <- data.frame(genes=top.logFC.fibrotype[[cl]], state=cl)
+}
+
+# summarize in one dataframe
+highlightgenes.fibrotype <- as.data.frame(data.table::rbindlist(highlightgenes.fibrotype))
+
+SCC.fibro <- ScaleData(SCC.fibro,
+                       features = as.character(highlightgenes.fibrotype$genes),
+                       do.scale = T,
+                       do.center = T,
+                       scale.max = 10,
+                       assay = "RNA")
+expr.RNAscaledata <- as.data.frame(GetAssayData(SCC.fibro, assay = "RNA", slot = "scale.data"))
+#subset expression matrix by highlight genes
+expr.RNAscaledata.hl.fibrotype <- expr.RNAscaledata[as.character(highlightgenes.fibrotype$genes),]
+#set colorbreaks as above
+colorbreaks.RNAscaledata.hl.fibrotype <- c(-max(abs(expr.RNAscaledata.hl.fibrotype)),
+                                           -(mean(unlist(abs(expr.RNAscaledata.hl.fibrotype))[unlist(abs(expr.RNAscaledata.hl.fibrotype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.fibrotype))[unlist(abs(expr.RNAscaledata.hl.fibrotype))!=0])),
+                                           0,
+                                           mean(unlist(abs(expr.RNAscaledata.hl.fibrotype))[unlist(abs(expr.RNAscaledata.hl.fibrotype))!=0]) + 2*sd(unlist(abs(expr.RNAscaledata.hl.fibrotype))[unlist(abs(expr.RNAscaledata.hl.fibrotype))!=0]),
+                                           max(abs(expr.RNAscaledata.hl.fibrotype)))
+
+#Heatmap clustered by columns and rows, rows split by differential expression of certain cluster
+expr.RNAscaledata.hl.fibrotype.hm <- Heatmap(expr.RNAscaledata.hl.fibrotype,
+                                             name="scale.data",
+                                             col=circlize::colorRamp2(breaks=colorbreaks.RNAscaledata.hl.fibrotype, colors = c("red","purple", "black", "yellow","white")),
+                                             show_column_names = F,
+                                             show_row_names = T,
+                                             cluster_columns = T,
+                                             cluster_column_slices = F,
+                                             clustering_method_columns = "ward.D2",
+                                             clustering_distance_columns = "euclidean",
+                                             column_split = SCC.fibro$fibrotype,
+                                             row_split = factor(highlightgenes.fibrotype$state, levels = levels(SCC.fibro$fibrotype)),
+                                             cluster_rows = F, row_order = highlightgenes.fibrotype$genes,
+                                             row_title_rot = 0,
+                                             column_title_rot = 90,
+                                             #graphic options
+                                             row_names_gp = gpar(fontsize=8),
+                                             column_names_gp = gpar(fontsize=11),
+                                             row_title_gp = gpar(fontsize=11),
+                                             column_title_gp = gpar(fontsize=11),
+                                             heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                                             border = T,
+                                             use_raster = T,
+                                             raster_device = "CairoPNG",
+                                             raster_quality = 4,
+                                             height = unit(5,"in"),
+                                             width = unit(5,"in"))
+#Save Heatmap
+pdf(paste0(OUTPUT,"figs/SCCfilt-fibrofilt-diffexpr-SCTccmito-fibrotype-HM-RNAscaledata-top",as.character(topgenes),".pdf"), width=20, height=30)
+expr.RNAscaledata.hl.fibrotype.hm
+dev.off()
+```
+
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/SCCfilt-fibrofilt-typeanalysis.RData"),SCC.fibro)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/SCCfilt-fibrofilt-typeanalysis-sessionInfo.txt"))
+```

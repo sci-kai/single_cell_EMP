@@ -13,7 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 library(Seurat)
-OUTPUT = "//bi-medfiles.win.uni-due.de/translationale hautkrebsforschung/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/"
 
 #all cells
 load(paste0(OUTPUT,"RData/SCCfiltnod.RData"))

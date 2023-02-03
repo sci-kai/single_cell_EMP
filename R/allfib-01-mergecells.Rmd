@@ -1,0 +1,159 @@
+---
+title: "Merge cells"
+author: "Kai"
+date: "6th April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ComplexHeatmap)
+
+source(paste0("~/tscr/kai/projects/01_SCC_scRNA/results/functions.R"))
+OUTPUT = "~/tscr/kai/projects/01_SCC_scRNA/results/alldatasets/"
+```
+
+# load all seurat objects
+
+```{r}
+#cohort
+load("~/tscr/kai/projects/01_SCC_scRNA/results/samples/cohort/all/rp/RData/SCCfilt-fibrofilt-typeanalysis.RData")
+#Kürten
+load("~/tscr/kai/projects/01_SCC_scRNA/results/pubdatasets/kuertendata/HPVneg_CD45n_analysis/RData/HNSCC-fibrofilt-typeanalysis.RData")
+```
+
+# Merge all Cells
+
+```{r}
+HNSCC.f.new = CreateSeuratObject(counts = HNSCC.f@assays$RNA@counts)
+HNSCC.f.new$patients <- HNSCC.f$patients
+HNSCC.f.new$fibrotype1 <- HNSCC.f$fibrotype1
+HNSCC.f.new$Lok <- "PT"
+SCC.fibro.new = CreateSeuratObject(counts = SCC.fibro@assays$RNA@counts)
+SCC.fibro.new$patients <- SCC.fibro$patient
+SCC.fibro.new$Lok <- SCC.fibro$Lok
+SCC.fibro.new$fibrotype1 <- SCC.fibro$fibrotype1
+
+SCC <- merge(x = SCC.fibro.new,
+             y = list(HNSCC.f.new))
+
+SCC$patients <- factor(SCC$patients,levels = sort(unique(SCC$patients)))
+SCC$Lok <- factor(SCC$Lok,levels=c("PT","LN-MET","LN","NA"))
+
+rm(SCC.fibro,SCC.fibro.new)
+rm(HNSCC.f,HNSCC.f.new)
+```
+
+# Normalization
+
+## Normalization of RNA assay
+
+```{r SCC_normalization}
+#RNA normalization without regressing, necessary for example for differential gene expression not based on SCT.
+DefaultAssay(SCC) <- "RNA"
+#log-normalization for slot "data"
+SCC <- NormalizeData(SCC, 
+                     normalization.method = "LogNormalize", #default
+                     scale.factor = 10000, #default, scale factor 10000 is recommendation from seurat tutorial
+                     assay = "RNA",
+                     margin = 1 # default; normalizes across features
+) 
+
+#Find Variable Features
+SCC <- FindVariableFeatures(SCC, 
+                            assay = "RNA",
+                            selection.method = "vst", #default
+                            nfeatures = 2000 #default; only 2000 , 3000 for SCT promises since to "restore" some more VariableFeatures
+)
+
+#scaling for slot "scale.data"
+SCC <- ScaleData(SCC,
+                 features = VariableFeatures(SCC,assay = "RNA"),
+                 do.scale = T,
+                 do.center = T,
+                 scale.max = 10,
+                 assay = "RNA")
+```
+
+# Similarity between patients using cosine similarity
+
+```{r}
+#patient specific phenotypes
+SCC$patfibtype1 <- SCC$fibrotype1
+SCC$patfibtype1[SCC$patfibtype1=="Immune"] <- "Immune-1"
+SCC$patfibtype1 <- paste0(SCC$patfibtype1,"_",SCC$patients)
+
+marker.allgenes.patfibtype.df <- calculate_foldchanges(SCC,SCC$patfibtype1)
+marker.allgenes.patfibtype.df.wide <- reshape2::dcast(data = marker.allgenes.patfibtype.df,formula = gene ~ cluster,value.var = "avg_log2FC")
+rownames(marker.allgenes.patfibtype.df.wide) <- marker.allgenes.patfibtype.df.wide$gene
+marker.allgenes.patfibtype.df.wide <- marker.allgenes.patfibtype.df.wide[,-1]
+
+cosinesim <- lsa::cosine(as.matrix(marker.allgenes.patfibtype.df.wide))
+
+cosinesim.im <- cosinesim[grep("Immune",rownames(cosinesim)),grep("Immune",colnames(cosinesim))]
+rownames(cosinesim.im) <- sub("Immune-","type",rownames(cosinesim.im))
+colnames(cosinesim.im) <- sub("Immune-","type",colnames(cosinesim.im))
+
+rowtype <- unlist(lapply(strsplit(rownames(cosinesim.im),split = "_"),function(x) x[1]))
+names(rowtype) <- rownames(cosinesim.im)
+coltype <- unlist(lapply(strsplit(colnames(cosinesim.im),split = "_"),function(x) x[1]))
+names(coltype) <- colnames(cosinesim.im)
+
+#colors
+imtypecol <- colorRampPalette(c(scales::hue_pal()(6)[2],"lightgreen"))(6)[2:5]
+names(imtypecol ) <- paste0("type",1:4)
+
+cosinesim.hm <- Heatmap(cosinesim.im,
+                        name="cosine similarity",
+                        col=circlize::colorRamp2(breaks=c(-1,0,1), colors = c("blue","white","red")),
+                        show_column_names = T,
+                        show_row_names = T,
+                        row_labels = unlist(lapply(strsplit(rownames(cosinesim.im),split = "_"),function(x) x[2])),
+                        column_labels = unlist(lapply(strsplit(colnames(cosinesim.im),split = "_"),function(x) x[2])),
+                        cluster_rows = T,
+                        clustering_distance_rows = "euclidean",
+                        clustering_method_rows = "ward.D2",
+                        cluster_columns = T,
+                        clustering_distance_columns = "euclidean",
+                        clustering_method_columns = "ward.D2",
+                        column_dend_height = unit(2,"cm"),
+                        row_dend_width = unit(2,"cm"),
+                        right_annotation = HeatmapAnnotation(typeno=anno_text(sub("type","",rowtype),gp = gpar(fontsize=10)),
+                                                             df = data.frame(type=rowtype),
+                                                             col = list(type=imtypecol),
+                                                             which="row",show_legend=T,annotation_name_gp = gpar(fontsize=11),annotation_name_side = "top",annotation_name_rot = 60),
+                        bottom_annotation = HeatmapAnnotation(typeno=anno_text(sub("type","",coltype),gp = gpar(fontsize=10)),
+                                                              df = data.frame(type=coltype),
+                                                              col = list(type=imtypecol),
+                                                              which="column",show_legend=T,annotation_name_gp = gpar(fontsize=11),annotation_name_side = "right"),
+                        #graphic options
+                        column_title_rot = 90,
+                        row_names_gp = gpar(fontsize=9),
+                        column_names_gp = gpar(fontsize=9),
+                        row_title_gp = gpar(fontsize=11),
+                        heatmap_legend_param = list(title_gp = gpar(fontsize=11), labels_gp = gpar(fontsize=11)),
+                        border = T,
+                        border_gp = gpar(lwd = 0.1),
+                        width = unit(5,"in"),
+                        height = unit(5,"in")
+)
+
+pdf(paste0(OUTPUT,"figs/allfibro-patfibtype-cosinesim.pdf"), width=20, height=20)
+cosinesim.hm
+dev.off()
+```
+
+## Save 
+
+```{r}
+#Single Seurat object
+save(file = paste0(OUTPUT,"RData/allfibro.RData"),SCC)
+#SessionInfo
+writeLines(capture.output(sessionInfo()), paste0(OUTPUT,"RData/allfibro-sessionInfo.txt"))
+```
+

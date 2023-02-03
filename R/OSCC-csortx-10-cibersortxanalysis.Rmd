@@ -283,6 +283,40 @@ ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNAnoall-bp.svg"),c
 ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNAnoall-bp-noleg.svg"),cellfrac.noall.bp + theme(legend.position = "none"), width=5, height=5)
 ```
 
+As pie charts
+
+```{r}
+Lokfrac <- lapply(unique(sampleloks.bulk),function(x) {
+  #get samples for specific Lok
+  samplenames <- grep("all",names(sampleloks.bulk[sampleloks.bulk==x]),value = T,invert = T)
+  #calculate percentage of cells per lokalisation
+  colMeans(cellfrac.noall[samplenames,])
+})
+names(Lokfrac) <- unique(sampleloks.bulk)
+Lokfrac <- do.call(rbind,Lokfrac)
+
+library(ggplot2)
+bulk.pie.PT <- ggplot(data=data.frame(value=Lokfrac["PT",],Var=factor(colnames(Lokfrac),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+bulk.pie.LNMET <- ggplot(data=data.frame(value=Lokfrac["MET",],Var=factor(colnames(Lokfrac),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+bulk.pie.LN <- ggplot(data=data.frame(value=Lokfrac["LN",],Var=factor(colnames(Lokfrac),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNA-nobatch-pie-PT.svg"),bulk.pie.PT,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNA-nobatch-pie-LNMET.svg"),bulk.pie.LNMET,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-bulkRNA-nobatch-pie-LN.svg"),bulk.pie.LN,width = 5,height = 5)
+```
+
 ## single cell RNA
 
 ```{r}
@@ -328,4 +362,36 @@ cellfrac.scRNA.bp <- ggplot(data=reshape2::melt(cellfrac.scRNA.forbp)) +
 
 ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-bp.svg"),cellfrac.scRNA.bp, width=5, height=5)
 ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-bp-noleg.svg"),cellfrac.scRNA.bp + theme(legend.position = "none"), width=5, height=5)
+```
+
+```{r}
+Lokfrac.scRNA <- lapply(unique(sampleloks),function(x) {
+  #get samples for specific Lok
+  samplenames <- grep("all",names(sampleloks[sampleloks==x]),value = T,invert = T)
+  #calculate percentage of cells per lokalisation
+  colMeans(cellfrac.scRNA[samplenames,])
+})
+names(Lokfrac.scRNA) <- unique(sampleloks)
+Lokfrac.scRNA <- do.call(rbind,Lokfrac.scRNA)
+
+library(ggplot2)
+scRNA.pie.PT <- ggplot(data=data.frame(value=Lokfrac.scRNA["PT",],Var=factor(colnames(Lokfrac.scRNA),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+scRNA.pie.LNMET <- ggplot(data=data.frame(value=Lokfrac.scRNA["MET",],Var=factor(colnames(Lokfrac.scRNA),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+scRNA.pie.LN <- ggplot(data=data.frame(value=Lokfrac.scRNA["LN",],Var=factor(colnames(Lokfrac.scRNA),levels = types)),aes(x="",y=value,fill=Var)) +
+  geom_bar(stat="identity", color="white") +
+  scale_fill_manual(values = clustercolors) +
+  coord_polar("y",start=0) +
+  theme_void()
+
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-pie-PT.svg"),scRNA.pie.PT,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-pie-LNMET.svg"),scRNA.pie.LNMET,width = 5,height = 5)
+ggsave(filename = paste0(OUTPUT,"figs/cellfraction-zoom0-scRNA-pie-LN.svg"),scRNA.pie.LN,width = 5,height = 5)
 ```
