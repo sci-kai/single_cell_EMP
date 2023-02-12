@@ -289,7 +289,7 @@ show.velocity.on.embedding.cor(emb,
                                arrow.scale=2,
                                show.grid.flow=TRUE,
                                min.grid.cell.mass=0.5,
-                               grid.n=50,
+                               grid.n=30,
                                arrow.lwd=1,
                                do.par=F,
                                cell.border.alpha = 0
